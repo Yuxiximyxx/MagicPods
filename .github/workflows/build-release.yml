@@ -50,13 +50,13 @@ jobs:
           mkdir -p dist
           SRC=$(ls app/build/outputs/apk/release/*.apk | head -1)
           echo "release apk: $SRC"
-          cp "$SRC" dist/MagicPods-2.10.6-release.apk
+          cp "$SRC" dist/MagicPods-2.10.7-release.apk
           ls -lh dist
 
       - name: Verify signature
         run: |
           SDK=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          "$SDK/apksigner" verify --print-certs dist/MagicPods-2.10.6-release.apk
+          "$SDK/apksigner" verify --print-certs dist/MagicPods-2.10.7-release.apk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -68,35 +68,35 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.10.6
-          name: MagicPods 2.10.6
+          tag_name: v2.10.7
+          name: MagicPods 2.10.7
           body: |
-            ## MagicPods 2.10.6（控制中心资源潜行 + 仓电量试喂）
+            ## MagicPods 2.10.7（仓电量正喂 + 卡头图标定名）
 
-            先纠正一个认反了一晚上的事实（真机日志实锤）：本机 Free4 的
-            MAC 是 88:92:CC:E5:00:8D（prodId 00VVD9、capsule 键 "Third"）；
-            C8:68:DE:62:45:53 是 HUAWEI FreeBuds 5（capsule 键 VRDK）。
-            而且报障截图那张卡是控制中心服务卡（com.hihonor.controlcenter
-            按模块注入的 DeviceInfo 渲染），不是 AAM 的详情页——图标与
-            电量都要在控制中心进程里查，前几版盯 AAM 进程是盯错了地方。
+            v2.10.6 真机结论：修好电量解析后，控制中心服务卡已显示
+            L/R 左右耳电量段、球位图标已是入耳式；剩两件——仓电量没
+            喂上、服务卡头部仍是头戴线条图标。本版一件修复、一件侦察。
 
-            本版三件事：
+            本版两件事：
 
-            - 控制中心资源潜行：在控制中心（及 SystemUI）进程里盯住
-              ImageView.setImageResource、Resources.getDrawable、
-              Context.getDrawable，命中把资源 id 解析成 type/entry 名
-              连同调用栈记进日志——抓服务卡渲染 Free4 时取的那张
-              drawable 的真名。
-            - BatteryData 方法面转储：每进程一次，把 BatteryData 的
-              全部方法与全部 static int 常量打进日志，看清它到底有
-              没有充电仓电量的接口。
-            - 仓电量试喂：电量全局值本是 L/R/C 三段齐全，旧解析把仓值
-              丢了（甚至让整对解析失败）。本版逐段解析三段，在
-              BatteryData 上按候选名依次试仓电量 setter、能力位扫
-              CASE/BOX 的 POWER_ABILITY_* 常量并入；没有接口就记一行
-              「无仓电量接口」。左/右喂法一字未动。
+            - 仓电量正喂（修复）：v2.10.6 转储的 BatteryData 方法面
+              实锤仓 setter 是 setChargerPower(int)，仓能力位是
+              POWER_ABILITY_CHARGER（=8）。v2.10.6 按候选名猜 setter
+              全部落空、误报「无仓电量接口」；本版改为 C 段存在时直调
+              setChargerPower(C)，能力位反射读 POWER_ABILITY_CHARGER
+              并入（读不到退回字面值 8），日志打「★★ 三段电量喂入:
+              左x 右y 仓z」。左/右喂法一字未动。
+            - 卡头图标定名（侦察）：v2.10.6 资源潜行只抓到球的
+              initIcon 取三张耳机默认图与卡创建期间的电量格图标——
+              卡头图标不走 Java 资源 API。本版改盯成品交付层：hook
+              ImageView.setImageDrawable/setImageBitmap 记 drawable
+              类名与调用栈；另 hook DeviceServiceCardView 构造/init，
+              完成后延迟转储整棵视图树，逐个 ImageView 的 drawable
+              用 ConstantState 与三个候选（default/in_ear/semi_in_ear，
+              按 entry 名从宿主资源表查 id）比对定名。
 
-            AAM 侧 HonorEarphoneHook 不动。与 2.10.1–2.10.5 同一签名，
+            AAM 侧 HonorEarphoneHook 不动。与 2.10.1–2.10.6 同一签名，
+
             可直接覆盖安装。装好后重启控制中心进程（或重连耳机），
             打开一次控制中心服务卡，再导出 LSPosed 日志即可。
           files: dist/*.apk

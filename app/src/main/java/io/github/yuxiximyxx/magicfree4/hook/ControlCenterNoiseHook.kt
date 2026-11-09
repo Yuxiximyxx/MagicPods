@@ -50,6 +50,10 @@ object ControlCenterNoiseHook : HookContext() {
         runCatching { dumpBatteryDataSurface() }.onFailure {
             Log.w(TAG, "BatteryData 方法面转储外层失败: ${it.javaClass.simpleName}: ${it.message}")
         }
+        // ── 0b) v2.10.7 侦察：卡头图标定名（setImageDrawable 成品层 + 卡视图树转储）──
+        runCatching { installCardIconSnoop() }.onFailure {
+            Log.e(TAG, "install 卡头图标定名 failed: ${it.javaClass.simpleName}: ${it.message}")
+        }
 
         // ── 1) 按钮点亮：fromBatteryData 为 null 时注入数据 ──
         runCatching {
@@ -1591,53 +1595,37 @@ object ControlCenterNoiseHook : HookContext() {
         for (cn in listOf("POWER_ABILITY_LEFT", "POWER_ABILITY_RIGHT")) {
             ability = ability or bdCls.getDeclaredField(cn).apply { isAccessible = true }.getInt(null)
         }
-        // ── v2.10.6 仓电量试喂：全局值第三段 C 是充电仓电量。BatteryData 有没有
-        //    仓接口未经真机证实，先按候选 setter 名依次试（存在哪个用哪个）；
-        //    能力位同理扫名字含 CASE/BOX 的 POWER_ABILITY_* 常量 OR 进去；
-        //    一个 setter 都没有就记「无仓电量接口」。左/右行为不受此段影响。
+        // ── v2.10.7 仓电量正喂：v2.10.6 的方法面转储已实锤 BatteryData 的仓
+        //    setter 就是 setChargerPower(int)（另有 getChargerPower /
+        //    isSupportChargerPower，无 setSupportChargerPower——支持标志应由
+        //    ability 位派生）；仓能力位是 POWER_ABILITY_CHARGER（真机常量值 8）。
+        //    v2.10.6 按候选名猜 setter 全部落空、误报「无仓电量接口」，本版直调。
         val caseLevel = lr.third
+        var caseFed = false
         if (caseLevel != null) {
-            var fed = false
-            for (setterName in listOf(
-                "setCasePower", "setBoxPower", "setChargeCasePower", "setCaseBattery", "setBoxBattery"
-            )) {
-                val m = bdCls.declaredMethods.firstOrNull {
-                    it.name == setterName && it.parameterCount == 1 &&
-                        it.parameterTypes[0] == Int::class.javaPrimitiveType
-                } ?: continue
-                runCatching {
-                    m.isAccessible = true
-                    m.invoke(bd, caseLevel)
-                    fed = true
-                    Log.w(TAG, "★★ 仓电量喂入: $setterName($caseLevel)")
+            caseFed = runCatching {
+                bdCls.getMethod("setChargerPower", Int::class.javaPrimitiveType).invoke(bd, caseLevel)
+                true
+            }.onFailure {
+                Log.w(TAG, "仓电量 setChargerPower($caseLevel) 调用失败: ${it.javaClass.simpleName}: ${it.message}")
+            }.getOrDefault(false)
+            if (caseFed) {
+                val chargerBit = runCatching {
+                    bdCls.getDeclaredField("POWER_ABILITY_CHARGER")
+                        .apply { isAccessible = true }.getInt(null)
                 }.onFailure {
-                    Log.w(TAG, "仓电量 setter $setterName 调用失败: ${it.javaClass.simpleName}: ${it.message}")
-                }
-                if (fed) break
+                    Log.w(TAG, "POWER_ABILITY_CHARGER 常量读取失败，退回字面值 8: ${it.javaClass.simpleName}: ${it.message}")
+                }.getOrDefault(8)
+                ability = ability or chargerBit
             }
-            var caseAbility = 0
-            var caseAbilityNames = ""
-            for (f in bdCls.declaredFields) {
-                if (!java.lang.reflect.Modifier.isStatic(f.modifiers)) continue
-                if (f.type != Int::class.javaPrimitiveType) continue
-                val fn = f.name
-                if (fn.contains("POWER_ABILITY") && (fn.contains("CASE") || fn.contains("BOX"))) {
-                    runCatching {
-                        f.isAccessible = true
-                        caseAbility = caseAbility or f.getInt(null)
-                        caseAbilityNames += "$fn "
-                    }
-                }
-            }
-            if (caseAbility != 0) {
-                ability = ability or caseAbility
-                Log.w(TAG, "仓能力位并入: $caseAbilityNames(ability=0x${"%X".format(ability)})")
-            }
-            if (!fed) Log.w(TAG, "无仓电量接口: BatteryData 无候选仓 setter（仓电量 $caseLevel 无处喂）")
         }
         bdCls.getMethod("setPowerAbility", Int::class.javaPrimitiveType).invoke(bd, ability)
         info.javaClass.getMethod("setBatteryData", bdCls).invoke(info, bd)
-        Log.w(TAG, "★★ 双耳电量喂入: 左${lr.first}% 右${lr.second}% (ability=0x${"%X".format(ability)})")
+        if (caseFed) {
+            Log.w(TAG, "★★ 三段电量喂入: 左${lr.first}% 右${lr.second}% 仓${caseLevel}% (ability=0x${"%X".format(ability)})")
+        } else {
+            Log.w(TAG, "★★ 双耳电量喂入: 左${lr.first}% 右${lr.second}% (ability=0x${"%X".format(ability)})")
+        }
     }.onFailure { Log.w(TAG, "双耳电量喂入失败: ${it.javaClass.simpleName}: ${it.message}") }
 
     private fun batteryLevelForCard(): Int? = runCatching {
@@ -1821,6 +1809,237 @@ object ControlCenterNoiseHook : HookContext() {
             Log.i(TAG, "BatteryData 方法面转储结束: 方法 ${bdCls.declaredMethods.size} 个, static int 常量 $constCount 个")
         }.onFailure {
             Log.w(TAG, "BatteryData 方法面转储失败: ${it.javaClass.simpleName}: ${it.message}")
+        }
+    }
+
+    // ── v2.10.7 卡头图标定名 ─────────────────────────────
+    // v2.10.6 资源潜行实证：服务卡头部那张头戴线条图标不走 Java 资源 API
+    // （getDrawable/setImageResource 只抓到球的 BasicDeviceBallView.initIcon
+    // 取三张耳机默认图、与卡创建期间电量格的图标），疑为布局 XML 原生
+    // inflate 或现成 Drawable 直塞 setImageDrawable。本节改盯「成品交付」
+    // 层：setImageDrawable/setImageBitmap 谁往 ImageView 塞了什么类；
+    // 再在 DeviceServiceCardView 构造/init 完成后延迟 ~300ms 转储其整棵
+    // 视图树，把每个 ImageView 的 drawable 用 ConstantState 与三个已知
+    // 候选（device_icon_default_earphone / device_icon_in_ear_earphone_shadow /
+    // device_icon_semi_in_ear_earphone_shadow，按 entry 名从宿主资源表查 id，
+    // 不写死数值）逐一比对，命中即定名、未命中记 unknown。每张卡只转储一次。
+    // 本 hook 在 controlcenter 与 systemui 两进程各跑一份：systemui 里没有
+    // DeviceServiceCardView 类，该项装不上记一行跳过，不算失败。
+    private val CARD_ICON_GUARD = ThreadLocal.withInitial { false }
+    private val CARD_ICON_TOTAL = java.util.concurrent.atomic.AtomicInteger(0)
+    private val CARD_ICON_SEEN: MutableSet<String> =
+        java.util.Collections.synchronizedSet(mutableSetOf())
+    private val CARD_TREE_DUMPED: java.util.Set<Any> =
+        java.util.Collections.synchronizedSet(
+            java.util.Collections.newSetFromMap(java.util.WeakHashMap<Any, Boolean>())
+        )
+
+    private fun installCardIconSnoop() {
+        var hooked = 0
+
+        // (a) setImageDrawable(Drawable)：卡头若是现成 Drawable 直塞，必经此处。
+        runCatching {
+            val m = findClass("android.widget.ImageView")
+                .getDeclaredMethod("setImageDrawable", android.graphics.drawable.Drawable::class.java)
+            m.isAccessible = true
+            module.hook(m).intercept { chain ->
+                runCatching {
+                    val d = chain.args.getOrNull(0) as? android.graphics.drawable.Drawable
+                    if (d != null) onCardIconDelivery("ImageView.setImageDrawable", describeDrawable(d))
+                }
+                chain.proceed()
+            }
+            hooked++
+            Log.i(TAG, "卡头定名装载: ImageView.setImageDrawable(Drawable) OK")
+        }.onFailure {
+            Log.w(TAG, "卡头定名装载: ImageView.setImageDrawable(Drawable) 失败: ${it.javaClass.simpleName}: ${it.message}")
+        }
+
+        // (b) setImageBitmap(Bitmap)：成品若是位图直塞，走这条。
+        runCatching {
+            val m = findClass("android.widget.ImageView")
+                .getDeclaredMethod("setImageBitmap", android.graphics.Bitmap::class.java)
+            m.isAccessible = true
+            module.hook(m).intercept { chain ->
+                runCatching {
+                    val b = chain.args.getOrNull(0) as? android.graphics.Bitmap
+                    if (b != null) {
+                        onCardIconDelivery(
+                            "ImageView.setImageBitmap",
+                            "Bitmap ${b.width}x${b.height} config=${b.config}"
+                        )
+                    }
+                }
+                chain.proceed()
+            }
+            hooked++
+            Log.i(TAG, "卡头定名装载: ImageView.setImageBitmap(Bitmap) OK")
+        }.onFailure {
+            Log.w(TAG, "卡头定名装载: ImageView.setImageBitmap(Bitmap) 失败: ${it.javaClass.simpleName}: ${it.message}")
+        }
+
+        // (c) DeviceServiceCardView 构造/init：完成后延迟转储视图树（每卡一次）。
+        runCatching {
+            val cardCls = findClass("com.hihonor.controlviewnew.deviceservicecard.DeviceServiceCardView")
+            var n = 0
+            for (ctor in cardCls.declaredConstructors) {
+                runCatching {
+                    ctor.isAccessible = true
+                    module.hook(ctor).intercept { chain ->
+                        val r = chain.proceed()
+                        chain.thisObject?.let { scheduleCardTreeDump(it) }
+                        r
+                    }
+                    n++
+                }.onFailure {
+                    Log.w(TAG, "卡头定名装载: DeviceServiceCardView 构造 hook 失败: ${it.javaClass.simpleName}: ${it.message}")
+                }
+            }
+            for (m in cardCls.declaredMethods.filter { it.name.startsWith("init") }) {
+                runCatching {
+                    m.isAccessible = true
+                    module.hook(m).intercept { chain ->
+                        val r = chain.proceed()
+                        chain.thisObject?.let { scheduleCardTreeDump(it) }
+                        r
+                    }
+                    n++
+                }.onFailure {
+                    Log.w(TAG, "卡头定名装载: DeviceServiceCardView.${m.name} hook 失败: ${it.javaClass.simpleName}: ${it.message}")
+                }
+            }
+            if (n == 0) throw IllegalStateException("构造/init 一个都没装上")
+            hooked += n
+            Log.i(TAG, "卡头定名装载: DeviceServiceCardView 构造/init OK（$n 个）")
+        }.onFailure {
+            Log.w(TAG, "卡头定名装载: DeviceServiceCardView 跳过: ${it.javaClass.simpleName}: ${it.message}")
+        }
+
+        Log.i(TAG, "installed: 卡头图标定名（$hooked 个入口）[setImageDrawable/setImageBitmap/DeviceServiceCardView]")
+        if (hooked == 0) throw IllegalStateException("卡头图标定名一个入口都没装上")
+    }
+
+    /** drawable 描述：类名 +（BitmapDrawable 再记 bitmap 宽高，其余记 intrinsic 宽高）。 */
+    private fun describeDrawable(d: android.graphics.drawable.Drawable): String {
+        val base = d.javaClass.name
+        return if (d is android.graphics.drawable.BitmapDrawable) {
+            val b = d.bitmap
+            if (b != null) "$base bitmap=${b.width}x${b.height}" else "$base bitmap=null"
+        } else {
+            "$base intrinsic=${d.intrinsicWidth}x${d.intrinsicHeight}"
+        }
+    }
+
+    /**
+     * setImageDrawable/setImageBitmap 命中处理：记 drawable 类名 + 过滤栈
+     * （≤20 帧）；按 (入口,描述,栈签名) 去重，总量封顶 40 条；纯观察原样放行
+     * （放行在调用方的 chain.proceed()，本函数只记日志）。
+     */
+    private fun onCardIconDelivery(entry: String, desc: String) {
+        if (CARD_ICON_GUARD.get() == true) return
+        val frames = Throwable().stackTrace.filter { st ->
+            val cn = st.className
+            !cn.startsWith("android.") &&
+                !cn.startsWith("androidx.") &&
+                !cn.startsWith("java.") &&
+                !cn.startsWith("io.github.yuxiximyxx.magicfree4") &&
+                !cn.startsWith("io.github.libxposed") &&
+                !cn.startsWith("org.lsposed") &&
+                cn != "java.lang.Thread"
+        }.take(20)
+        val sig = entry + "|" + desc + "|" +
+            frames.joinToString(">") { "${it.className}.${it.methodName}" }
+        if (!CARD_ICON_SEEN.add(sig)) return
+        if (CARD_ICON_TOTAL.get() >= 40) return
+        val n = CARD_ICON_TOTAL.incrementAndGet()
+        CARD_ICON_GUARD.set(true)
+        try {
+            Log.i(TAG, "卡头定名命中 #$n $entry → $desc")
+            for ((idx, st) in frames.withIndex()) {
+                Log.i(TAG, "卡头定名栈 #$n [$idx] ${st.className}.${st.methodName}")
+            }
+        } finally {
+            CARD_ICON_GUARD.set(false)
+        }
+    }
+
+    /** 卡构造/init 完成后，把视图树转储 post 到主线程延迟 ~300ms（等布局落位），每卡只排一次。 */
+    private fun scheduleCardTreeDump(card: Any) {
+        if (card !is android.view.View) return
+        if (!CARD_TREE_DUMPED.add(card)) return
+        runCatching {
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                runCatching { dumpCardTree(card) }
+                    .onFailure { Log.w(TAG, "卡视图树转储失败: ${it.javaClass.simpleName}: ${it.message}") }
+            }, 300)
+        }.onFailure {
+            Log.w(TAG, "卡视图树转储排程失败: ${it.javaClass.simpleName}: ${it.message}")
+        }
+    }
+
+    /**
+     * 转储卡视图树：先按 entry 名从宿主资源表查三个候选的 id 并预加载，
+     * 取各自 ConstantState 作比对基准；再递归全树，逐个 ImageView 记
+     * [视图类名, drawable 类名, intrinsic 宽高, 命中候选名或 unknown]。
+     */
+    private fun dumpCardTree(card: android.view.View) {
+        val ctx = card.context ?: return
+        val res = ctx.resources ?: return
+        val pkg = ctx.packageName
+        val candidates = mutableListOf<Pair<String, android.graphics.drawable.Drawable.ConstantState?>>()
+        for (entryName in listOf(
+            "device_icon_default_earphone",
+            "device_icon_in_ear_earphone_shadow",
+            "device_icon_semi_in_ear_earphone_shadow"
+        )) {
+            val id = runCatching { res.getIdentifier(entryName, "drawable", pkg) }.getOrDefault(0)
+            val cs = if (id != 0) {
+                runCatching { res.getDrawable(id, null)?.constantState }.getOrNull()
+            } else {
+                null
+            }
+            candidates += entryName to cs
+            Log.i(
+                TAG,
+                "卡头候选: $entryName id=${if (id != 0) "0x" + Integer.toHexString(id) else "未找到"}" +
+                    " constantState=${if (cs != null) "已加载" else "无"}"
+            )
+        }
+        Log.i(TAG, "卡视图树转储开始: root=${card.javaClass.name}")
+        dumpViewNode(card, candidates)
+        Log.i(TAG, "卡视图树转储结束")
+    }
+
+    private fun dumpViewNode(
+        v: android.view.View,
+        candidates: List<Pair<String, android.graphics.drawable.Drawable.ConstantState?>>
+    ) {
+        if (v is android.widget.ImageView) {
+            val d = v.drawable
+            if (d == null) {
+                Log.i(TAG, "卡视图树 ImageView[${v.javaClass.name}] drawable=null")
+            } else {
+                val cs = runCatching { d.constantState }.getOrNull()
+                var match = "unknown"
+                if (cs != null) {
+                    for ((name, candCs) in candidates) {
+                        if (candCs != null && (cs === candCs || cs == candCs)) {
+                            match = name
+                            break
+                        }
+                    }
+                }
+                Log.i(
+                    TAG,
+                    "卡视图树 ImageView[${v.javaClass.name}] drawable=${d.javaClass.name}" +
+                        " intrinsic=${d.intrinsicWidth}x${d.intrinsicHeight} match=$match"
+                )
+            }
+        }
+        if (v is android.view.ViewGroup) {
+            for (i in 0 until v.childCount) {
+                dumpViewNode(v.getChildAt(i), candidates)
+            }
         }
     }
 
