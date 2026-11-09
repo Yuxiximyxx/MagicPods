@@ -1829,7 +1829,7 @@ object ControlCenterNoiseHook : HookContext() {
     private val CARD_ICON_TOTAL = java.util.concurrent.atomic.AtomicInteger(0)
     private val CARD_ICON_SEEN: MutableSet<String> =
         java.util.Collections.synchronizedSet(mutableSetOf())
-    private val CARD_TREE_DUMPED: java.util.Set<Any> =
+    private val CARD_TREE_DUMPED: MutableSet<Any> =
         java.util.Collections.synchronizedSet(
             java.util.Collections.newSetFromMap(java.util.WeakHashMap<Any, Boolean>())
         )
