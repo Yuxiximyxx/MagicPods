@@ -25,6 +25,13 @@ import io.github.yuxiximyxx.magicfree4.utils.PodIdentity
  *    —— 原返回非 null 时用原值，不影响荣耀自家耳机
  * 2. setNoiseCtrlMode 拦截 → 映射为本模块 status → 广播 ACTION_ANC_SELECT
  *    → 复用已打通的 bluetooth 进程 RfcommController → SPP 0x4E 链路
+ *
+ * ★ 事实纠正（2026-11-10 00:50 真机日志实锤，此前认反过，勿再混淆）：
+ *   - 本机 Free4 的 MAC 是 88:92:CC:E5:00:8D（prodId 00VVD9、capsule 键 "Third"）
+ *   - C8:68:DE:62:45:53 是 HUAWEI FreeBuds 5（capsule 键 VRDK），不是 Free4
+ *   - 小乐截图报障的那张卡是控制中心服务卡——由本进程（com.hihonor.controlcenter）
+ *     按本 hook 注入的 DeviceInfo 渲染，不是 AAM 的 EarphoneDetailsActivity；
+ *     图标与电量问题都要在本进程查（v2.10.6 的资源潜行正为此装在这里）。
  */
 object ControlCenterNoiseHook : HookContext() {
     private const val TAG = "MagicOriG-CtrlCenter"
@@ -34,6 +41,16 @@ object ControlCenterNoiseHook : HookContext() {
     private const val DATA_CLS = "com.hihonor.controlviewnew.deviceservicecard.EarphoneNoiseData"
 
     override fun onHook() {
+        // ── 0) v2.10.6 侦察：控制中心资源潜行 + BatteryData 方法面转储 ──
+        //    截图那张卡是本进程渲染的服务卡，图标取的 drawable 与仓电量
+        //    接口都要在这里抓（见类头事实纠正）。
+        runCatching { installCcResourceSnoop() }.onFailure {
+            Log.e(TAG, "install 控制中心资源潜行 failed: ${it.javaClass.simpleName}: ${it.message}")
+        }
+        runCatching { dumpBatteryDataSurface() }.onFailure {
+            Log.w(TAG, "BatteryData 方法面转储外层失败: ${it.javaClass.simpleName}: ${it.message}")
+        }
+
         // ── 1) 按钮点亮：fromBatteryData 为 null 时注入数据 ──
         runCatching {
             val dataCls = findClass(DATA_CLS)
@@ -1534,17 +1551,27 @@ object ControlCenterNoiseHook : HookContext() {
     }.getOrDefault(false)
 
     /** 任务2：设备中心卡片电量 —— 读跨进程电量（L90,R85）取双耳平均，无数据返回 null */
-    /** 读跨进程电量原始对 "L90,R80" → (90,80)；无数据返回 null */
-    private fun readBatteryRaw(): Pair<Int, Int>? = runCatching {
+    /** 读跨进程电量原始值 "L100,R100,C90" → Triple(左, 右, 仓?)；L/R 缺一返回 null */
+    private fun readBatteryRaw(): Triple<Int, Int, Int?>? = runCatching {
         val app = Class.forName("android.app.ActivityThread")
             .getDeclaredMethod("currentApplication").invoke(null) as? android.content.Context
             ?: return null
         val raw = android.provider.Settings.Global.getString(app.contentResolver, "magicorig_battery")
             ?: return null
-        if (!raw.contains(",")) return null
-        val l = raw.substringBefore(',').removePrefix("L").toIntOrNull()
-        val r = raw.substringAfter(',').removePrefix("R").toIntOrNull()
-        if (l == null || r == null) null else Pair(l, r)
+        // 逐段按前缀解析。旧写法 substringAfter(',') 会把 ",C90" 粘进 R 段尾巴，
+        // 三段齐全时 R 解析成 null、整对被丢弃——FIX-005 记的「仓值被丢」即源于此。
+        var l: Int? = null
+        var r: Int? = null
+        var c: Int? = null
+        for (seg in raw.split(',')) {
+            val s = seg.trim()
+            when {
+                s.startsWith("L") -> l = s.removePrefix("L").toIntOrNull()
+                s.startsWith("R") -> r = s.removePrefix("R").toIntOrNull()
+                s.startsWith("C") -> c = s.removePrefix("C").toIntOrNull()
+            }
+        }
+        if (l == null || r == null) null else Triple(l!!, r!!, c)
     }.getOrNull()
 
     /**
@@ -1563,6 +1590,50 @@ object ControlCenterNoiseHook : HookContext() {
         var ability = 0
         for (cn in listOf("POWER_ABILITY_LEFT", "POWER_ABILITY_RIGHT")) {
             ability = ability or bdCls.getDeclaredField(cn).apply { isAccessible = true }.getInt(null)
+        }
+        // ── v2.10.6 仓电量试喂：全局值第三段 C 是充电仓电量。BatteryData 有没有
+        //    仓接口未经真机证实，先按候选 setter 名依次试（存在哪个用哪个）；
+        //    能力位同理扫名字含 CASE/BOX 的 POWER_ABILITY_* 常量 OR 进去；
+        //    一个 setter 都没有就记「无仓电量接口」。左/右行为不受此段影响。
+        val caseLevel = lr.third
+        if (caseLevel != null) {
+            var fed = false
+            for (setterName in listOf(
+                "setCasePower", "setBoxPower", "setChargeCasePower", "setCaseBattery", "setBoxBattery"
+            )) {
+                val m = bdCls.declaredMethods.firstOrNull {
+                    it.name == setterName && it.parameterCount == 1 &&
+                        it.parameterTypes[0] == Int::class.javaPrimitiveType
+                } ?: continue
+                runCatching {
+                    m.isAccessible = true
+                    m.invoke(bd, caseLevel)
+                    fed = true
+                    Log.w(TAG, "★★ 仓电量喂入: $setterName($caseLevel)")
+                }.onFailure {
+                    Log.w(TAG, "仓电量 setter $setterName 调用失败: ${it.javaClass.simpleName}: ${it.message}")
+                }
+                if (fed) break
+            }
+            var caseAbility = 0
+            var caseAbilityNames = ""
+            for (f in bdCls.declaredFields) {
+                if (!java.lang.reflect.Modifier.isStatic(f.modifiers)) continue
+                if (f.type != Int::class.javaPrimitiveType) continue
+                val fn = f.name
+                if (fn.contains("POWER_ABILITY") && (fn.contains("CASE") || fn.contains("BOX"))) {
+                    runCatching {
+                        f.isAccessible = true
+                        caseAbility = caseAbility or f.getInt(null)
+                        caseAbilityNames += "$fn "
+                    }
+                }
+            }
+            if (caseAbility != 0) {
+                ability = ability or caseAbility
+                Log.w(TAG, "仓能力位并入: $caseAbilityNames(ability=0x${"%X".format(ability)})")
+            }
+            if (!fed) Log.w(TAG, "无仓电量接口: BatteryData 无候选仓 setter（仓电量 $caseLevel 无处喂）")
         }
         bdCls.getMethod("setPowerAbility", Int::class.javaPrimitiveType).invoke(bd, ability)
         info.javaClass.getMethod("setBatteryData", bdCls).invoke(info, bd)
@@ -1585,6 +1656,173 @@ object ControlCenterNoiseHook : HookContext() {
             else -> null
         }
     }.getOrNull()
+
+    // ── v2.10.6 控制中心资源潜行 ─────────────────────────────
+    // AAM 侧观察点 14e 的同款潜行搬到控制中心进程：小乐截图那张卡是控制
+    // 中心服务卡（本进程按注入的 DeviceInfo 渲染），不是 AAM 的详情页——
+    // 球/卡渲染时取的那张 drawable 的真名只能在本进程的资源层抓到。
+    // 本 hook 经 HookEntry 在 com.hihonor.controlcenter 与
+    // com.android.systemui 两进程各装一份；入口逐个装、逐行记成败，尽力而为。
+    // 纯观察：命中只记日志，调用点一律原样 proceed。
+    private val CC_RES_GUARD = ThreadLocal.withInitial { false }
+    private val CC_RES_STACK_TOTAL = java.util.concurrent.atomic.AtomicInteger(0)
+    private val CC_RES_PAIR_COUNTS =
+        java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger>()
+
+    private fun installCcResourceSnoop() {
+        var hooked = 0
+
+        runCatching {
+            val m = findClass("android.widget.ImageView")
+                .getDeclaredMethod("setImageResource", Int::class.javaPrimitiveType)
+            m.isAccessible = true
+            module.hook(m).intercept { chain ->
+                val id = chain.args.getOrNull(0) as? Int
+                if (id != null) {
+                    val res = (chain.thisObject as? android.widget.ImageView)?.resources
+                    onCcResourceSnoopHit("ImageView.setImageResource", res, id)
+                }
+                chain.proceed()
+            }
+            hooked++
+            Log.i(TAG, "控制中心资源潜行装载: ImageView.setImageResource(int) OK")
+        }.onFailure {
+            Log.w(TAG, "控制中心资源潜行装载: ImageView.setImageResource(int) 失败: ${it.javaClass.simpleName}: ${it.message}")
+        }
+
+        runCatching {
+            val resCls = findClass("android.content.res.Resources")
+            for (m in listOf(
+                resCls.getDeclaredMethod("getDrawable", Int::class.javaPrimitiveType),
+                resCls.getDeclaredMethod(
+                    "getDrawable", Int::class.javaPrimitiveType,
+                    android.content.res.Resources.Theme::class.java
+                )
+            )) {
+                m.isAccessible = true
+                module.hook(m).intercept { chain ->
+                    val id = chain.args.getOrNull(0) as? Int
+                    if (id != null) {
+                        onCcResourceSnoopHit(
+                            "Resources.getDrawable", chain.thisObject as? android.content.res.Resources, id
+                        )
+                    }
+                    chain.proceed()
+                }
+                hooked++
+            }
+            Log.i(TAG, "控制中心资源潜行装载: Resources.getDrawable(int)/(int,Theme) OK")
+        }.onFailure {
+            Log.w(TAG, "控制中心资源潜行装载: Resources.getDrawable 失败: ${it.javaClass.simpleName}: ${it.message}")
+        }
+
+        runCatching {
+            val m = findClass("android.content.Context")
+                .getDeclaredMethod("getDrawable", Int::class.javaPrimitiveType)
+            m.isAccessible = true
+            module.hook(m).intercept { chain ->
+                val id = chain.args.getOrNull(0) as? Int
+                if (id != null) {
+                    val res = (chain.thisObject as? android.content.Context)?.resources
+                    onCcResourceSnoopHit("Context.getDrawable", res, id)
+                }
+                chain.proceed()
+            }
+            hooked++
+            Log.i(TAG, "控制中心资源潜行装载: Context.getDrawable(int) OK")
+        }.onFailure {
+            Log.w(TAG, "控制中心资源潜行装载: Context.getDrawable(int) 失败: ${it.javaClass.simpleName}: ${it.message}")
+        }
+
+        Log.i(TAG, "installed: 控制中心资源潜行（$hooked 个入口）[setImageResource/getDrawable]")
+        if (hooked == 0) throw IllegalStateException("控制中心资源潜行一个入口都没装上")
+    }
+
+    /**
+     * 命中处理与 AAM 侧 14e 同口径：先用宿主 Resources 把 id 解析成
+     * type/entry 名（失败记 hex），按 (入口,id) 去重——每对只打前 2 次
+     * 全栈、全栈总量封顶 60 条，之后只计数汇总；打栈滤框架/本模块帧，
+     * 最多 25 帧。全程持 CC_RES_GUARD 防日志输出递归触发潜行。
+     */
+    private fun onCcResourceSnoopHit(entry: String, res: android.content.res.Resources?, id: Int) {
+        if (CC_RES_GUARD.get() == true) return
+        // id=0 是「清图」调用，无信息量，直接放过不记。
+        if (id == 0) return
+        val key = "$entry|0x${Integer.toHexString(id)}"
+        val count = CC_RES_PAIR_COUNTS
+            .computeIfAbsent(key) { java.util.concurrent.atomic.AtomicInteger(0) }
+            .incrementAndGet()
+        val full = count <= 2 && CC_RES_STACK_TOTAL.get() < 60
+        if (!full && count != 3 && count % 50 != 0) return
+        CC_RES_GUARD.set(true)
+        try {
+            if (full) {
+                val n = CC_RES_STACK_TOTAL.incrementAndGet()
+                val name = resolveCcDrawableName(res, id)
+                Log.i(TAG, "控制中心资源潜行命中 #$n $entry → $name（该入口+id 第 $count 次）")
+                val frames = Throwable().stackTrace.filter { st ->
+                    val cn = st.className
+                    !cn.startsWith("android.") &&
+                        !cn.startsWith("androidx.") &&
+                        !cn.startsWith("java.") &&
+                        !cn.startsWith("io.github.yuxiximyxx.magicfree4") &&
+                        !cn.startsWith("io.github.libxposed") &&
+                        !cn.startsWith("org.lsposed") &&
+                        cn != "java.lang.Thread"
+                }.take(25)
+                for ((idx, st) in frames.withIndex()) {
+                    Log.i(TAG, "控制中心资源潜行栈 #$n [$idx] ${st.className}.${st.methodName}")
+                }
+            } else {
+                Log.i(TAG, "控制中心资源潜行计数 $entry id=0x${Integer.toHexString(id)} 已达 $count 次（每对只打前 2 次全栈，全栈封顶 60 条）")
+            }
+        } finally {
+            CC_RES_GUARD.set(false)
+        }
+    }
+
+    /** 用宿主 Resources 把 drawable id 解析成 "type/entry (0xid)"；失败退回 hex。 */
+    private fun resolveCcDrawableName(res: android.content.res.Resources?, id: Int): String {
+        val hex = "0x${Integer.toHexString(id)}"
+        if (res == null) return "id=$hex（无 Resources 可解析）"
+        val type = runCatching { res.getResourceTypeName(id) }.getOrNull()
+        val entry = runCatching { res.getResourceEntryName(id) }.getOrNull()
+        return if (type != null && entry != null) {
+            "$type/$entry ($hex)"
+        } else {
+            "id=$hex（名称解析失败）"
+        }
+    }
+
+    // ── v2.10.6 BatteryData 方法面转储（每进程只跑一次） ──────
+    // 仓电量有没有接口，先把 BatteryData 的全部 declared 方法与全部
+    // static int 常量（名+值）摆出来，再对着 feedDualBattery 的试喂结果看。
+    private val BATTERY_SURFACE_DUMPED = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    private fun dumpBatteryDataSurface() {
+        if (!BATTERY_SURFACE_DUMPED.compareAndSet(false, true)) return
+        runCatching {
+            val bdCls = findClass("com.hihonor.controlviewnew.info.BatteryData")
+            Log.i(TAG, "BatteryData 方法面转储开始（pkg=$packageName）")
+            for (m in bdCls.declaredMethods.sortedBy { it.name }) {
+                val params = m.parameterTypes.joinToString(",") { it.simpleName }
+                Log.i(TAG, "BatteryData 方法: ${m.name}($params): ${m.returnType.simpleName}")
+            }
+            var constCount = 0
+            for (f in bdCls.declaredFields) {
+                if (!java.lang.reflect.Modifier.isStatic(f.modifiers)) continue
+                if (f.type != Int::class.javaPrimitiveType) continue
+                runCatching {
+                    f.isAccessible = true
+                    Log.i(TAG, "BatteryData 常量: ${f.name} = ${f.getInt(null)}")
+                    constCount++
+                }
+            }
+            Log.i(TAG, "BatteryData 方法面转储结束: 方法 ${bdCls.declaredMethods.size} 个, static int 常量 $constCount 个")
+        }.onFailure {
+            Log.w(TAG, "BatteryData 方法面转储失败: ${it.javaClass.simpleName}: ${it.message}")
+        }
+    }
 
     private fun readLastAnc(): String? = runCatching {
         val app = Class.forName("android.app.ActivityThread")

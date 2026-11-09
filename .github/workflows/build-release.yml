@@ -50,13 +50,13 @@ jobs:
           mkdir -p dist
           SRC=$(ls app/build/outputs/apk/release/*.apk | head -1)
           echo "release apk: $SRC"
-          cp "$SRC" dist/MagicPods-2.10.5-release.apk
+          cp "$SRC" dist/MagicPods-2.10.6-release.apk
           ls -lh dist
 
       - name: Verify signature
         run: |
           SDK=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          "$SDK/apksigner" verify --print-certs dist/MagicPods-2.10.5-release.apk
+          "$SDK/apksigner" verify --print-certs dist/MagicPods-2.10.6-release.apk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -68,29 +68,35 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.10.5
-          name: MagicPods 2.10.5
+          tag_name: v2.10.6
+          name: MagicPods 2.10.6
           body: |
-            ## MagicPods 2.10.5（资源层潜行侦察版）
+            ## MagicPods 2.10.6（控制中心资源潜行 + 仓电量试喂）
 
-            本版仍不修图标，只加侦察——但这次证据已经把范围逼到最后一层：
+            先纠正一个认反了一晚上的事实（真机日志实锤）：本机 Free4 的
+            MAC 是 88:92:CC:E5:00:8D（prodId 00VVD9、capsule 键 "Third"）；
+            C8:68:DE:62:45:53 是 HUAWEI FreeBuds 5（capsule 键 VRDK）。
+            而且报障截图那张卡是控制中心服务卡（com.hihonor.controlcenter
+            按模块注入的 DeviceInfo 渲染），不是 AAM 的详情页——图标与
+            电量都要在控制中心进程里查，前几版盯 AAM 进程是盯错了地方。
 
-            - v2.10.4 文件潜行 + adb 直查已定案：详情卡画图不走任何文件
-              API；AAM 的 assets/images 只有 L001、ZA08 两款真机型的图，
-              数据目录里没有图片资源包，FCPG.json 的 deviceImageUrl 为空。
-              头戴图只能是 AAM 内置的资源 drawable，经 Resources 原生
-              加载——文件层盯不到它，改盯资源层。
-            - 本版在 AAM 进程里盯住 ImageView.setImageResource、
-              Resources.getDrawable、Context.getDrawable（宿主有
-              AppCompatImageView 时一并盯）：命中就把资源 id 解析成
-              type/entry 名连同调用栈记进 LSPosed 日志。
-            - 顺带把宿主 R$drawable 的字段菜单按关键字过滤后打进日志，
-              并把 getDeviceInfo 返回的设备信息包全部字段转储出来
-              （副线：电量三段齐全但卡只显示单个值，看包里电量的 key）。
-            - Activity 时间标记补 onCreate/onPostResume 两路。
-            - 既有全部逻辑（capsule 改写、各类潜行与观察点）原样保留。
+            本版三件事：
 
-            与 2.10.1–2.10.4 同一签名，可直接覆盖安装。装好后重启面板
-            进程（强停「音频产品管家」或重连耳机），打开一次详情卡，
-            再导出 LSPosed 日志即可。
+            - 控制中心资源潜行：在控制中心（及 SystemUI）进程里盯住
+              ImageView.setImageResource、Resources.getDrawable、
+              Context.getDrawable，命中把资源 id 解析成 type/entry 名
+              连同调用栈记进日志——抓服务卡渲染 Free4 时取的那张
+              drawable 的真名。
+            - BatteryData 方法面转储：每进程一次，把 BatteryData 的
+              全部方法与全部 static int 常量打进日志，看清它到底有
+              没有充电仓电量的接口。
+            - 仓电量试喂：电量全局值本是 L/R/C 三段齐全，旧解析把仓值
+              丢了（甚至让整对解析失败）。本版逐段解析三段，在
+              BatteryData 上按候选名依次试仓电量 setter、能力位扫
+              CASE/BOX 的 POWER_ABILITY_* 常量并入；没有接口就记一行
+              「无仓电量接口」。左/右喂法一字未动。
+
+            AAM 侧 HonorEarphoneHook 不动。与 2.10.1–2.10.5 同一签名，
+            可直接覆盖安装。装好后重启控制中心进程（或重连耳机），
+            打开一次控制中心服务卡，再导出 LSPosed 日志即可。
           files: dist/*.apk
