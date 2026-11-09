@@ -50,13 +50,13 @@ jobs:
           mkdir -p dist
           SRC=$(ls app/build/outputs/apk/release/*.apk | head -1)
           echo "release apk: $SRC"
-          cp "$SRC" dist/MagicPods-2.10.11-release.apk
+          cp "$SRC" dist/MagicPods-2.10.12-release.apk
           ls -lh dist
 
       - name: Verify signature
         run: |
           SDK=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          "$SDK/apksigner" verify --print-certs dist/MagicPods-2.10.11-release.apk
+          "$SDK/apksigner" verify --print-certs dist/MagicPods-2.10.12-release.apk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -68,34 +68,30 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.10.11
-          name: MagicPods 2.10.11
+          tag_name: v2.10.12
+          name: MagicPods 2.10.12
           body: |
-            ## MagicPods 2.10.11（播控门控定位信号，侦察版）
+            ## MagicPods 2.10.12（机型名改写只限通知树）
 
-            v2.10.9 给播控设备行加的祖先链门控真机未命中：
-            改写点的祖先链全是通用布局类（FrameLayout /
-            LinearLayout / RelativeLayout / HnCardLayout），
-            播控设备行与通知、灵动胶囊区分不开。本版仍是
-            侦察，不改放行行为，只补定位信号。
+            播控案结案（v2.10.11「改写信号」真机实锤）：切歌 /
+            打开播控时成对出现的改写事件，是下拉通知栏里切歌
+            通知（media style 通知）的标题被 TextView.setText
+            终防线改写的表象——真正的播控面板根本没有被模块
+            碰过，设备名一直是好的。
 
             本版改动（只动 SystemUIHeadsetIconHook）：
 
-            - 机型名分支决定改写前（无论最终改不改），额外
-              采集两个信号打一行「改写信号」日志，按文本+
-              两信号签名去重、封顶 20 条：
-              ① 视图 id 名（view.resources 解析 entry 名，
-              无 id 记 no-id、解析失败记 hex）；
-              ② 窗口/Activity 类名（沿 view.context 的
-              ContextWrapper 链 unwrap 找第一个 Activity，
-              找不到记 context 本身的类名），并列 rootView
-              的类名。
-            - v2.10.9 的祖先链日志与 MediaOutput 门控保留
-              原样；readBatteryLine 等其余逻辑不动。
+            - rewriteAudioLabel 新增 inRemoteViewsTree 参数：
+              RemoteViews.apply/reapply 的通知树遍历传 true，
+              TextView.setText 终防线传 false。
+            - 机型名→电量行 改写只在通知树内发生；setText
+              路径对机型名直接不改——切歌通知标题恢复为设备
+              名（原生形态），胶囊/通知/服务卡所需的电量行
+              改写（通知树内）保留。
+            - 「当前音频输入输出设备」→ 机型名 的替换两条
+              路径都保留；祖先链日志、MediaOutput 门控与
+              「改写信号」日志原样保留。
 
-            v2.10.8–v2.10.10 的全部改动原样保留。与
-            2.10.1–2.10.10 同一签名，可直接覆盖安装。装好后
-            重连 Free4，依次触发通知、灵动胶囊与播控的设备
-            名显示，导出 LSPosed 日志，对照三者的「改写
-            信号」即可定下一版的门控特征。
+            v2.10.8–v2.10.11 的全部改动原样保留。与
+            2.10.1–2.10.11 同一签名，可直接覆盖安装。
           files: dist/*.apk

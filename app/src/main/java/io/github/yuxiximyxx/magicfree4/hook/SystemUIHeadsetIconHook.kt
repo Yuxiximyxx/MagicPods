@@ -129,8 +129,17 @@ object SystemUIHeadsetIconHook : HookContext() {
      * 占位文案换成当前机型名；已经是任一支持机型的名字时换成电量行。
      * ★ 例外（v2.10.9）：媒体输出选择器（播控）的设备行要显示设备名——
      * view 祖先链含 MediaOutput/OutputSwitcher 时跳过机型名→电量行改写。
+     * ★ v2.10.12：机型名→电量行 只在 RemoteViews 通知树内做（inRemoteViewsTree=true）。
+     * 真机日志实锤：所谓「播控名字没了」是下拉通知栏里切歌通知（media style）标题
+     * 被 setText 终防线改写的表象，真正的播控面板从未被模块碰过。故 setText 路径
+     * 对机型名一律不改（返回 null），切歌通知标题恢复设备名；「占位文案→机型名」
+     * 替换两条路径都保留。
      */
-    private fun rewriteAudioLabel(text: String, view: android.view.View? = null): String? = when {
+    private fun rewriteAudioLabel(
+        text: String,
+        view: android.view.View? = null,
+        inRemoteViewsTree: Boolean = false
+    ): String? = when {
         text == "当前音频输入输出设备" -> currentDisplayName()
         PodProfiles.ALL.any { it.displayName == text } -> {
             logRewriteSignal(text, view)
@@ -143,7 +152,9 @@ object SystemUIHeadsetIconHook : HookContext() {
                     Log.i(TAG, "改写祖先链: '$text' <- ${chain.joinToString(" <- ")}")
                 }
             }
-            if (chain.any {
+            if (!inRemoteViewsTree) {
+                null
+            } else if (chain.any {
                     it.contains("MediaOutput", ignoreCase = true) ||
                         it.contains("OutputSwitcher", ignoreCase = true)
                 }
@@ -193,7 +204,7 @@ object SystemUIHeadsetIconHook : HookContext() {
                         fun walk(v: android.view.View) {
                             if (v is android.widget.TextView) {
                                 val cur = v.text?.toString() ?: ""
-                                val out = rewriteAudioLabel(cur, v)
+                                val out = rewriteAudioLabel(cur, v, inRemoteViewsTree = true)
                                 if (out != null) {
                                     v.text = out
                                     changed++
@@ -226,7 +237,9 @@ object SystemUIHeadsetIconHook : HookContext() {
             }.apply { isAccessible = true }
             module.hook(m).intercept { chain ->
                 val t = (chain.args.getOrNull(0) as? CharSequence)?.toString()
-                val out = t?.let { rewriteAudioLabel(it, chain.thisObject as? android.view.View) }
+                val out = t?.let {
+                    rewriteAudioLabel(it, chain.thisObject as? android.view.View, inRemoteViewsTree = false)
+                }
                 if (t != null && out != null) {
                     Log.w(TAG, "★★★★ TextView.setText 改写: '$t' → '$out'")
                     val newArgs = chain.args.toTypedArray()
