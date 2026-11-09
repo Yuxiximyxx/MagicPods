@@ -51,17 +51,6 @@
             </intent-filter>
         </activity>
 
-        <activity android:name=".PopupActivity"
-            android:theme="@style/Theme.MagicOriG.Popup"
-            android:taskAffinity=""
-            android:excludeFromRecents="true"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="io.github.yuxiximyxx.magicfree4.action.show_pods_ui" />
-                <category android:name="android.intent.category.DEFAULT" />
-            </intent-filter>
-        </activity>
-
         <!-- Xposed Module 声明 -->
         <meta-data
             android:name="xposedmodule"

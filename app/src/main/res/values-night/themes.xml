@@ -5,8 +5,4 @@
         <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:windowBackground">#FF121212</item>
     </style>
-    <style name="Theme.MagicOriG.Popup" parent="android:Theme.Material.Dialog">
-        <item name="android:windowIsFloating">true</item>
-        <item name="android:windowBackground">@android:color/transparent</item>
-    </style>
 </resources>

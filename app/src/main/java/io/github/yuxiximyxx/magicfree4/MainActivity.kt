@@ -1,35 +1,19 @@
 package io.github.yuxiximyxx.magicfree4
 
+import android.content.Intent
 import android.os.Bundle
-import android.view.WindowManager
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
-import io.github.yuxiximyxx.magicfree4.ui.MagicOriGAppCompose
-import io.github.yuxiximyxx.magicfree4.ui.MagicOriGTheme
 
+/**
+ * 模块设置入口（LSPosed 管理器的 MODULE_SETTINGS）跳板：
+ * v2.10.10 起删掉旧首页（HomePage+底部导航），进模块直达耳机详情页。
+ * 本 Activity 不渲染任何界面，onCreate 里立即转发并 finish，避免闪旧界面。
+ * 桌面启动器走 manifest 的 LauncherActivity alias（同样指向详情页）。
+ */
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        setContent {
-            MagicOriGTheme {
-                MagicOriGAppCompose()
-            }
-        }
-    }
-}
-
-class PopupActivity : ComponentActivity() {
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        window.addFlags(
-            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-        )
-        setContent {
-            MagicOriGTheme {
-                MagicOriGAppCompose()
-            }
-        }
+        startActivity(Intent(this, EarphoneDetailActivity::class.java))
+        finish()
     }
 }

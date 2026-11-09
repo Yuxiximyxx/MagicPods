@@ -50,13 +50,13 @@ jobs:
           mkdir -p dist
           SRC=$(ls app/build/outputs/apk/release/*.apk | head -1)
           echo "release apk: $SRC"
-          cp "$SRC" dist/MagicPods-2.10.9-release.apk
+          cp "$SRC" dist/MagicPods-2.10.10-release.apk
           ls -lh dist
 
       - name: Verify signature
         run: |
           SDK=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          "$SDK/apksigner" verify --print-certs dist/MagicPods-2.10.9-release.apk
+          "$SDK/apksigner" verify --print-certs dist/MagicPods-2.10.10-release.apk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -68,45 +68,35 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.10.9
-          name: MagicPods 2.10.9
+          tag_name: v2.10.10
+          name: MagicPods 2.10.10
           body: |
-            ## MagicPods 2.10.9（右耳电量三处解析修复 + 播控设备名保留）
+            ## MagicPods 2.10.10（删模块首页，进模块直达耳机详情页）
 
-            小乐 01:32 五张截图实证：灵动胶囊、音频切换通知、
-            播控中心与蓝牙列表的电量行、以及模块页都只显示
-            「左耳 100% 右耳 --%」。根因与服务卡 v2.10.6 修掉的
-            是同款两段解析 bug——跨进程电量通道 magicorig_battery
-            现在恒为三段 "L100,R100,C90"，旧写法
-            raw.substringAfter(',').removePrefix("R") 取右耳会
-            得到 "100,C90" 解析失败，右耳永远缺失。
+            小乐拍板：模块 App 首页（电量解析是旧写法
+            substringAfterLast("R")、且只在打开时读一次）没用，
+            连接耳机前后都只显示那个界面；详情页三段电量齐全、
+            功能完整。本版删掉首页，进模块直达详情页。
 
             本版改动：
 
-            - 三处解析统一改成逐段按 L/R/C 前缀取值（同
-              EarphoneDetailActivity.parseBattery 口径）：
-              SystemUIHeadsetIconHook.readBatteryLine()、
-              MediaSwsBatteryHook.readBatteryPair()、
-              ControlCenterNoiseHook.batteryLevelForCard()
-              （第三处旧写法让 r 恒 null、卡片均值退化成只取左值）。
-            - 播控中心设备名保留：SystemUIHeadsetIconHook
-              .rewriteAudioLabel 原先把任何文本恰等于机型名的
-              TextView 都换成电量行，媒体输出选择器的设备行也
-              因此丢了名字。改写前先沿 TextView 的 parent 链
-              向上收集祖先类名（≤12 层），任一含 MediaOutput
-              或 OutputSwitcher 就跳过改写；每次命中把祖先链
-              打一行日志（按文本+链签名去重、封顶 20 条）便于
-              下一轮核对门控覆盖。
-            - 写入端留痕：RfcommController 写 magicorig_battery
-              的日志补全为 L/R/C 三值与左右 isConnected
-              （「电量已写入 Settings.Global: Lx Ry Cz
-              connL=.. connR=..」）。模块页同一时刻右耳显示 "?"
-              说明那一刻写入端 R 值本身可能为 0，本版只加日志
-              不改写入逻辑，等日志坐实再动。
+            - MainActivity 改为跳板：onCreate 里显式 Intent 启动
+              EarphoneDetailActivity 后 finish()，不渲染任何界面
+              （LSPosed 管理器的模块设置入口从此也直达详情页；
+              桌面启动器原本就走 alias 直达详情页，不变）。
+            - 详情页「关于耳机」里原「模块设置」NavRow 是跳
+              MainActivity 的入口——MainActivity 已成回跳板、
+              点了会绕回本页，故去掉该行。
+            - 模块识别自检（ModuleDiagnostics）原挂在首页，
+              已迁到详情页「关于耳机」的「模块」一节，自检入口
+              不丢失。
+            - PopupActivity 全仓无任何调用方（manifest 里挂着
+              show_pods_ui 的 intent-filter，但代码里无人发送），
+              连同其类、manifest 条目与专属 Popup 主题样式一并
+              删除；ui/App.kt（HomePage/底部导航/旧关于页）随之
+              整体删除。
 
-            v2.10.8 的卡头图标替换与隐藏单值电量原样保留。
-            与 2.10.1–2.10.8 同一签名，可直接覆盖安装。装好后
-            重连耳机（让 SystemUI/蓝牙进程跑新代码），验证：
-            胶囊、通知、播控电量行应显示右耳数值，播控的设备
-            行应显示设备名。
+            v2.10.8/v2.10.9 的全部改动原样保留。与 2.10.1–2.10.9
+            同一签名，可直接覆盖安装。装好后从 LSPosed 管理器
+            或桌面图标进模块，应直接看到耳机详情页。
           files: dist/*.apk

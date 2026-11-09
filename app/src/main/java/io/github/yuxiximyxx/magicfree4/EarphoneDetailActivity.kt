@@ -68,6 +68,7 @@ import androidx.compose.ui.unit.sp
 import io.github.yuxiximyxx.magicfree4.pods.hem.EqPreset
 import io.github.yuxiximyxx.magicfree4.pods.hem.PodProfile
 import io.github.yuxiximyxx.magicfree4.pods.hem.PodProfiles
+import io.github.yuxiximyxx.magicfree4.diag.ModuleDiagnostics
 import io.github.yuxiximyxx.magicfree4.ui.MagicOriGTheme
 import io.github.yuxiximyxx.magicfree4.utils.DeviceIdentity
 import io.github.yuxiximyxx.magicfree4.utils.MagicOriGAction
@@ -329,14 +330,6 @@ class EarphoneDetailActivity : ComponentActivity() {
                         6 -> AboutPage(
                             profile = profile,
                             mac = mac, firmware = firmware, caps = caps,
-                            onOpenModuleSettings = {
-                                runCatching {
-                                    startActivity(
-                                        Intent(this@EarphoneDetailActivity, MainActivity::class.java)
-                                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                    )
-                                }
-                            },
                         )
                         7 -> BatteryHistoryPage(history = battHistory)
                         5 -> EqEditPage(
@@ -912,7 +905,6 @@ class EarphoneDetailActivity : ComponentActivity() {
         mac: String,
         firmware: String,
         caps: Set<Int>,
-        onOpenModuleSettings: () -> Unit,
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(24.dp)) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -941,9 +933,30 @@ class EarphoneDetailActivity : ComponentActivity() {
             }
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 SectionTitle("模块")
-                Card20(padding = 0.dp) {
-                    Column {
-                        NavRow("模块设置", "作用域、日志、调试选项") { onOpenModuleSettings() }
+                // v2.10.10：旧首页删除后，模块识别自检从 HomePage 迁到这里（关于页），入口不丢。
+                // 原「模块设置」NavRow 跳 MainActivity——MainActivity 已改成回跳板、会绕回本页，故一并去掉。
+                val diagReport = remember { runCatching { ModuleDiagnostics.collect(this@EarphoneDetailActivity) }.getOrNull() }
+                Card20 {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        if (diagReport == null) {
+                            Text("模块识别自检读取失败", fontSize = 14.sp, color = P.danger)
+                        } else {
+                            Text(
+                                if (diagReport.recognized) "✓ LSPosed 可识别" else "✗ LSPosed 不可识别",
+                                fontSize = 14.sp,
+                                color = if (diagReport.recognized) P.success else P.danger,
+                            )
+                            diagReport.checks().forEach { check ->
+                                val mark = if (check.ok == true) "✔" else if (check.ok == false) "✘" else "•"
+                                val c = if (check.ok == true) P.success
+                                        else if (check.ok == false) P.danger
+                                        else P.textSecondary
+                                Text(
+                                    "$mark ${check.label}${check.detail?.let { " — $it" } ?: ""}",
+                                    fontSize = 12.sp, color = c,
+                                )
+                            }
+                        }
                     }
                 }
             }
