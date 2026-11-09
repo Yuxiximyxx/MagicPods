@@ -42,6 +42,11 @@ object HonorEarphoneHook : HookContext() {
     private val IMAGE_DISCOVERY_STARTED = java.util.concurrent.atomic.AtomicBoolean(false)
     private val IMAGE_REDIRECT_COUNT = java.util.concurrent.atomic.AtomicInteger(0)
 
+    // 观察点 14c（v2.10.3）：y0.f 资源下载器拦截——String 实参打印计数（封顶 40 次）
+    // 与 Third→FCPG 改写计数（每次改写都记一行）。
+    private val Y0F_ARG_LOG_COUNT = java.util.concurrent.atomic.AtomicInteger(0)
+    private val Y0F_REWRITE_COUNT = java.util.concurrent.atomic.AtomicInteger(0)
+
     // 观察点 14b（v2.10.2 侦察）：android.util.Log 潜行——命中计数、全栈打印上限、
     // 线程级重入守卫（模块自己写日志若底层也走 android.util.Log，命中特征的
     // 输出行不得在同一线程再次触发潜行）。
@@ -406,6 +411,23 @@ object HonorEarphoneHook : HookContext() {
             Log.e(TAG, "install Log 潜行 failed: ${it.javaClass.simpleName}: ${it.message}")
         }
 
+        // ── 观察点 14c（v2.10.3）：y0.f —— Capsule 资源下载器拦截改写 ──
+        // v2.10.2 潜行抓到的真实调用栈（自日志点向上）：
+        //   LogUtils.g ← z0.e.d ← y0.f.k（下载 capsule.webp）/ y0.f.m（capsule.png）
+        //   ← y0.f.v ← y0.f.s ← y0.f.e ← y0.a.run
+        // AAM 从 CDN 拉 https://contentplatform-drcn.hihonorcdn.com/
+        //   HCEPBusiness/Third/uiconfig/0/capsule.webp|png
+        // "Third" 的 capsule 资源在 11.0.0.117 后是通用头戴图。本版直接 hook
+        // y0.f 全部方法：String 实参全量留痕，并把 "Third" / "/Third/" 段
+        // 改写成 "FCPG"，让它去拉入耳式那套资源（见 installY0fIntercept）。
+        // capsule 到底喂球位还是详情卡未定，这是一次判别实验：装后两处
+        // 分别变不变由真机判定。改写范围锁死在 y0.f 一个类内。
+        runCatching {
+            installY0fIntercept()
+        }.onFailure {
+            Log.e(TAG, "install y0.f 拦截 failed: ${it.javaClass.simpleName}: ${it.message}")
+        }
+
         Log.i(TAG, "onHook done pkg=$packageName")
     }
 
@@ -437,7 +459,13 @@ object HonorEarphoneHook : HookContext() {
         // v2.10.2：枚举覆盖面留证——classloader pathList 与宿主 APK 文件
         // （sourceDir + splitSourceDirs）两路都扫，各来源的条数由枚举函数
         // 自己逐行打日志，最后取并集搜候选，下轮可据此确认到底扫了多少类。
-        val all = (enumerateDexClassNames() + enumerateApkFileClassNames()).distinct()
+        // v2.10.3：再加 MbbApi 所在 classloader 一路（见
+        // enumerateMbbApiClassLoaderClassNames），三路并集。
+        val all = (
+            enumerateDexClassNames() +
+                enumerateApkFileClassNames() +
+                enumerateMbbApiClassLoaderClassNames()
+            ).distinct()
         val total = all.size
 
         // 近似类名扫描：simple name 含 ImageLoad（忽略大小写）、或以 Utils
@@ -503,6 +531,81 @@ object HonorEarphoneHook : HookContext() {
     }
 
     /**
+     * 观察点 14c：hook 资源下载器类 y0.f 的全部 declared methods。
+     * 装载时先把完整方法面逐行打进日志（下轮排障证据）；每个方法 proceed 前
+     * 由 [onY0fCall] 处理 String 实参的留痕与 Third→FCPG 改写。单个方法
+     * 装不上只记 Log.w；y0.f 找不到记明确失败行，绝不影响其他观察点。
+     */
+    private fun installY0fIntercept() {
+        val clazz = runCatching { findClass("y0.f") }.getOrElse {
+            Log.e(TAG, "y0.f 拦截失败: 类 y0.f 未找到: ${it.javaClass.simpleName}: ${it.message}")
+            return
+        }
+        val methods = clazz.declaredMethods.toList()
+        for (m in methods) {
+            val params = m.parameterTypes.joinToString(", ") { it.simpleName }
+            val mods = if (java.lang.reflect.Modifier.isStatic(m.modifiers)) " static" else ""
+            Log.i(TAG, "y0.f 方法面:$mods ${m.name}($params): ${m.returnType.simpleName}")
+        }
+        var hooked = 0
+        for (m in methods) {
+            runCatching {
+                m.isAccessible = true
+                module.hook(m).intercept { chain -> onY0fCall(m, chain) }
+                hooked++
+            }.onFailure {
+                Log.w(TAG, "hook y0.f.${m.name} 失败: ${it.javaClass.simpleName}: ${it.message}")
+            }
+        }
+        Log.i(TAG, "installed: y0.f 拦截改写（$hooked/${methods.size} 个方法）[资源下载 Third→FCPG]")
+    }
+
+    /**
+     * y0.f 方法调用回调：先把全部 String 实参打进日志（截断 300 字符，
+     * 只记前 40 次带 String 实参的调用，防刷屏），再逐个套用
+     * [rewriteThirdToFcpg]；任一实参被改写就记一行原值→新值，并以
+     * 新参数 proceed；没有 String 实参或没有改写的调用原样 proceed，
+     * 宿主行为不变。
+     */
+    private fun onY0fCall(m: java.lang.reflect.Method, chain: XposedInterface.Chain): Any? {
+        val stringArgs = chain.args.mapIndexedNotNull { i, a -> (a as? String)?.let { i to it } }
+        if (stringArgs.isEmpty()) return chain.proceed()
+        val n = Y0F_ARG_LOG_COUNT.incrementAndGet()
+        if (n <= 40) {
+            for ((i, s) in stringArgs) {
+                Log.i(TAG, "y0.f.${m.name} String 实参#$n arg$i=${s.take(300)}")
+            }
+        }
+        var changed = false
+        val newArgs = chain.args.toTypedArray()
+        for ((i, s) in stringArgs) {
+            val rewritten = rewriteThirdToFcpg(s)
+            if (rewritten != s) {
+                newArgs[i] = rewritten
+                changed = true
+                val rn = Y0F_REWRITE_COUNT.incrementAndGet()
+                Log.i(TAG, "y0.f.${m.name} 改写 #$rn: ${s.take(300)} → ${rewritten.take(300)}")
+            }
+        }
+        return if (changed) chain.proceed(newArgs) else chain.proceed()
+    }
+
+    /**
+     * Third→FCPG 改写规则（只作用于 y0.f 的方法实参）：
+     * 恰为 "Third" → "FCPG"；包含 "/Third/" → 该段换成 "/FCPG/"
+     * （覆盖 …/HCEPBusiness/Third/uiconfig/… 这类完整 URL）；
+     * 包含 "HCEPBusiness/Third" → 换成 "HCEPBusiness/FCPG"
+     * （兜住以 Third 结尾、后面不带斜杠的路径）。
+     */
+    private fun rewriteThirdToFcpg(s: String): String {
+        if (s == "Third") return "FCPG"
+        var r = s
+        if (r.contains("/Third/")) r = r.replace("/Third/", "/FCPG/")
+        if (r.contains("HCEPBusiness/Third")) r = r.replace("HCEPBusiness/Third", "HCEPBusiness/FCPG")
+        return r
+    }
+
+    /**
      * 观察点 14b：给 android.util.Log 的 v/d/i/w/e 两个重载
      * （(String,String) 与 (String,String,Throwable)，共 10 个）装潜行 hook。
      * 同步装在 onHook 里，进程一起来就生效；单个重载装不上只记 Log.w，
@@ -535,12 +638,20 @@ object HonorEarphoneHook : HookContext() {
     }
 
     /** 潜行命中判定（廉价字符串 contains，命不中绝不取栈）：tag/msg 任一含
-     *  "ImageLoadUtils" 或 "res state"，或同时含 "Third" 与 "res"。 */
+     *  "ImageLoadUtils" 或 "res state"，或同时含 "Third" 与 "res"；
+     *  v2.10.3 放宽：再加 ".webp" / "HCEPBusiness" / "Downloading" /
+     *  "loadImage" / "imageUrl"（忽略大小写）任一命中即可——为了顺着
+     *  CapsuleResourceUtils 的下载日志摸清 capsule 资源到底喂给谁。 */
     private fun isImageLoadLogLine(tag: String?, msg: String?): Boolean {
         fun hit(s: String?): Boolean = s != null && (
             s.contains("ImageLoadUtils") ||
                 s.contains("res state") ||
-                (s.contains("Third") && s.contains("res"))
+                (s.contains("Third") && s.contains("res")) ||
+                s.contains(".webp", ignoreCase = true) ||
+                s.contains("HCEPBusiness", ignoreCase = true) ||
+                s.contains("Downloading", ignoreCase = true) ||
+                s.contains("loadImage", ignoreCase = true) ||
+                s.contains("imageUrl", ignoreCase = true)
             )
         return hit(tag) || hit(msg)
     }
@@ -548,7 +659,7 @@ object HonorEarphoneHook : HookContext() {
     /**
      * 潜行回调：命中特征时把 tag/msg 原文与当前调用栈（滤掉 android.util.Log、
      * 本模块与 hook 框架帧，最多 25 帧）打进模块日志——栈里第一个宿主帧的
-     * 类全名就是打出 "ImageLoadUtils" 日志的加载器真名。前 12 次打全栈，
+     * 类全名就是打出 "ImageLoadUtils" 日志的加载器真名。前 20 次打全栈，
      * 之后只计数、每 50 次汇总一行。模块自己的命中输出全程持线程级重入
      * 守卫（LOG_SNOOP_GUARD），其日志行不会再次触发潜行。无论命中与否，
      * 原日志调用一律照常 proceed，宿主行为不变。
@@ -560,7 +671,7 @@ object HonorEarphoneHook : HookContext() {
         if (!isImageLoadLogLine(tag, msg)) return chain.proceed()
         val n = LOG_SNOOP_HITS.incrementAndGet()
         when {
-            n <= 12 -> {
+            n <= 20 -> {
                 LOG_SNOOP_GUARD.set(true)
                 try {
                     Log.i(TAG, "Log潜行命中 #$n tag=$tag msg=$msg")
@@ -582,7 +693,7 @@ object HonorEarphoneHook : HookContext() {
             n % 50 == 0 -> {
                 LOG_SNOOP_GUARD.set(true)
                 try {
-                    Log.i(TAG, "Log潜行命中累计 $n 次（超 12 次后只计数汇总）")
+                    Log.i(TAG, "Log潜行命中累计 $n 次（超 20 次后只计数汇总）")
                 } finally {
                     LOG_SNOOP_GUARD.set(false)
                 }
@@ -622,33 +733,103 @@ object HonorEarphoneHook : HookContext() {
     }
 
     /**
+     * v2.10.3 枚举来源之三：MbbApi 所在 ClassLoader 的 dexElements——它和
+     * appClassLoader 在模块化宿主里未必是同一个，单独枚举留证。拿不到
+     * classloader / pathList 读不出来都记一行明确失败，不静默。
+     */
+    private fun enumerateMbbApiClassLoaderClassNames(): List<String> {
+        val names = LinkedHashSet<String>()
+        runCatching {
+            val loader = findClass(MBB_API).classLoader
+                ?: throw IllegalStateException("MbbApi 的 classLoader 为 null")
+            val pathList = runCatching {
+                val f = dalvik.system.BaseDexClassLoader::class.java
+                    .getDeclaredField("pathList").apply { isAccessible = true }
+                f.get(loader)
+            }.getOrNull() ?: throw IllegalStateException("MbbApi classLoader 读不到 pathList")
+            val elements = runCatching {
+                val f = pathList.javaClass.getDeclaredField("dexElements").apply { isAccessible = true }
+                @Suppress("UNCHECKED_CAST")
+                f.get(pathList) as Array<Any>
+            }.getOrNull() ?: throw IllegalStateException("MbbApi classLoader 读不到 dexElements")
+            for ((index, element) in elements.withIndex()) {
+                runCatching {
+                    val f = element.javaClass.getDeclaredField("dexFile").apply { isAccessible = true }
+                    val dexFile = f.get(element) as? dalvik.system.DexFile ?: return@runCatching
+                    val entries = dexFile.entries()
+                    var count = 0
+                    while (entries.hasMoreElements()) {
+                        names.add(entries.nextElement())
+                        count++
+                    }
+                    Log.i(TAG, "dex 来源[mbbapi-classloader#$index]: $count 个类名")
+                }
+            }
+            Log.i(TAG, "dex 来源[mbbapi-classloader]: 共 ${names.size} 个类名（elements=${elements.size}）")
+        }.onFailure {
+            Log.w(TAG, "dex 来源[mbbapi-classloader]: 枚举失败: ${it.javaClass.simpleName}: ${it.message}")
+        }
+        return names.toList()
+    }
+
+    /**
      * v2.10.2 枚举来源之二：宿主 App 的安装包文件本体——经 ActivityThread 取
      * ApplicationInfo，把 sourceDir 与 splitSourceDirs 逐个用 DexFile 打开
-     * 枚举，每个来源单独记一行条数。取不到 ApplicationInfo / 单个文件打开
-     * 失败都只记日志跳过，不影响 classloader 路径的枚举结果。
+     * 枚举，每个来源单独记一行条数。
+     * v2.10.3 补日志：真机实证 v2.10.2 这一路一行日志都没产出——旧代码在
+     * currentApplication() 返回 null 时静默 return，失败行根本没机会打。
+     * 本版每条取数路径（currentApplication / mInitialApplication 兜底 /
+     * 最终放弃）的结果或异常都必须落一行；每个文件的打开结果同理。
      */
     private fun enumerateApkFileClassNames(): List<String> {
         val names = LinkedHashSet<String>()
-        val appInfo = runCatching {
+        var appInfo: Any? = null
+        runCatching {
             val at = Class.forName("android.app.ActivityThread")
             val app = at.getDeclaredMethod("currentApplication").invoke(null)
-                ?: return emptyList()
-            app.javaClass.getMethod("getApplicationInfo").invoke(app)
-        }.getOrNull()
+            Log.i(TAG, "dex 来源[apk]: currentApplication() = ${app?.javaClass?.name ?: "null"}")
+            if (app != null) {
+                appInfo = app.javaClass.getMethod("getApplicationInfo").invoke(app)
+            }
+        }.onFailure {
+            Log.w(TAG, "dex 来源[apk]: 经 currentApplication 取 ApplicationInfo 失败: ${it.javaClass.simpleName}: ${it.message}")
+        }
         if (appInfo == null) {
-            Log.w(TAG, "dex 来源[apk]: 取 ApplicationInfo 失败，跳过 APK 文件枚举")
+            // 兜底：发现线程跑得比 Application 创建还早时 currentApplication 为 null，
+            // 改从 ActivityThread.mInitialApplication 取。
+            runCatching {
+                val at = Class.forName("android.app.ActivityThread")
+                val thread = at.getDeclaredMethod("currentActivityThread").invoke(null)
+                val f = at.getDeclaredField("mInitialApplication").apply { isAccessible = true }
+                val app = thread?.let { f.get(it) }
+                Log.i(TAG, "dex 来源[apk]: mInitialApplication = ${app?.javaClass?.name ?: "null"}")
+                if (app != null) {
+                    appInfo = app.javaClass.getMethod("getApplicationInfo").invoke(app)
+                }
+            }.onFailure {
+                Log.w(TAG, "dex 来源[apk]: 经 mInitialApplication 取 ApplicationInfo 失败: ${it.javaClass.simpleName}: ${it.message}")
+            }
+        }
+        if (appInfo == null) {
+            Log.w(TAG, "dex 来源[apk]: 两条路都取不到 ApplicationInfo，APK 文件枚举跳过")
             return emptyList()
         }
+        val info = appInfo ?: return emptyList()
+        val pkg = runCatching {
+            info.javaClass.getField("packageName").get(info) as? String
+        }.getOrNull()
+        Log.i(TAG, "dex 来源[apk]: ApplicationInfo 已取得 pkg=$pkg")
         val paths = mutableListOf<String>()
         runCatching {
-            appInfo.javaClass.getField("sourceDir").get(appInfo) as? String
+            info.javaClass.getField("sourceDir").get(info) as? String
         }.getOrNull()?.let { paths.add(it) }
         runCatching {
             @Suppress("UNCHECKED_CAST")
-            appInfo.javaClass.getField("splitSourceDirs").get(appInfo) as? Array<String>
+            info.javaClass.getField("splitSourceDirs").get(info) as? Array<String>
         }.getOrNull()?.let { paths.addAll(it) }
+        Log.i(TAG, "dex 来源[apk]: 待枚举文件 ${paths.size} 个: ${paths.joinToString()}")
         if (paths.isEmpty()) {
-            Log.w(TAG, "dex 来源[apk]: sourceDir/splitSourceDirs 均为空，跳过 APK 文件枚举")
+            Log.w(TAG, "dex 来源[apk]: sourceDir/splitSourceDirs 均为空，APK 文件枚举跳过")
             return emptyList()
         }
         for ((index, path) in paths.withIndex()) {

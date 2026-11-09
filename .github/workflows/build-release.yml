@@ -50,13 +50,13 @@ jobs:
           mkdir -p dist
           SRC=$(ls app/build/outputs/apk/release/*.apk | head -1)
           echo "release apk: $SRC"
-          cp "$SRC" dist/MagicPods-2.10.2-release.apk
+          cp "$SRC" dist/MagicPods-2.10.3-release.apk
           ls -lh dist
 
       - name: Verify signature
         run: |
           SDK=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          "$SDK/apksigner" verify --print-certs dist/MagicPods-2.10.2-release.apk
+          "$SDK/apksigner" verify --print-certs dist/MagicPods-2.10.3-release.apk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -68,17 +68,23 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.10.2
-          name: MagicPods 2.10.2
+          tag_name: v2.10.3
+          name: MagicPods 2.10.3
           body: |
-            ## MagicPods 2.10.2（侦察版）
+            ## MagicPods 2.10.3（判别实验版）
 
-            本版不修图标，只加侦察，为下一版定位「设备中心耳机卡把 Free4 画成头戴式」的真凶：
+            v2.10.2 侦察版已抓到真凶链路：耳机卡的大图是 AAM 从 CDN 下载的
+            capsule 资源（…/HCEPBusiness/Third/uiconfig/0/capsule.webp|png），
+            下载器是混淆类 y0.f——"Third" 的这套资源在系统更新后是通用头戴图。
 
-            - v2.10.1 实证：AAM 的 dex 里根本不存在名为 ImageLoadUtils 的类——"ImageLoadUtils" 只是它日志里的 TAG 字符串，真类名被混淆。
-            - 本版潜伏在 android.util.Log 上：AAM 里谁打出含 ImageLoadUtils / res state 的日志，就把它的调用栈记进 LSPosed 日志，栈顶宿主帧的类名就是加载器真名。
-            - dex 枚举补覆盖面证据：classloader 与宿主 APK（sourceDir + splits）两路逐个来源记录类名条数与总数。
-            - v2.10.1 的 Third→FCPG 重定向逻辑原样保留。
+            - 本版直接 hook y0.f 全部方法：String 实参里的 "Third"/"/Third/"
+              在下载前改写成 "FCPG"（入耳式那套），让它去拉正确的资源；
+              改写范围锁死在 y0.f 一个类内，其余功能一律不碰。
+            - capsule 到底喂球位图标还是详情卡顶部图标仍未定——这版就是
+              判别实验：装好后重启面板进程（强停「音频产品管家」或重连耳机），
+              分别看球位和详情卡的图标变没变。
+            - Log 潜行特征放宽（.webp / HCEPBusiness / Downloading 等），
+              dex 枚举补齐 APK 文件一路的日志。
 
-            与 2.10.1 同一签名，可直接覆盖安装。装好后重启耳机面板进程（强停「音频配件管理」或重连耳机），打开设备中心耳机卡，再导出 LSPosed 日志即可。
+            与 2.10.1 / 2.10.2 同一签名，可直接覆盖安装。
           files: dist/*.apk
