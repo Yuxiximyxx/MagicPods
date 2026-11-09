@@ -1637,12 +1637,24 @@ object ControlCenterNoiseHook : HookContext() {
         val raw = android.provider.Settings.Global.getString(app.contentResolver, "magicorig_battery")
             ?: return null
         if (!raw.contains(",")) return null
-        val l = raw.substringBefore(',').removePrefix("L").toIntOrNull()
-        val r = raw.substringAfter(',').removePrefix("R").toIntOrNull()
+        // 逐段按前缀解析（与 readBatteryRaw 同口径）：旧写法 substringAfter(',')
+        // 在三段 "L100,R100,C90" 时把 ",C90" 粘进 R 段 → r 恒 null、
+        // 平均退化成只取左值（同款 bug，v2.10.9 一并修）。
+        var l: Int? = null
+        var r: Int? = null
+        for (seg in raw.split(',')) {
+            val s = seg.trim()
+            when {
+                s.startsWith("L") -> l = s.removePrefix("L").toIntOrNull()
+                s.startsWith("R") -> r = s.removePrefix("R").toIntOrNull()
+            }
+        }
+        val lv = l
+        val rv = r
         when {
-            l != null && r != null -> (l + r) / 2
-            l != null -> l
-            r != null -> r
+            lv != null && rv != null -> (lv + rv) / 2
+            lv != null -> lv
+            rv != null -> rv
             else -> null
         }
     }.getOrNull()

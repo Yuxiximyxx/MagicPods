@@ -671,7 +671,7 @@ object RfcommController {
                 // 连接态信号（任务6）：电量数据到达 = 耳机在线；断连时 disconnectedPod 置 0。
                 // 设备中心球列表注入据此门控 —— 断连后球/卡片消失。
                 android.provider.Settings.Global.putString(res, "magicorig_connected", "1")
-                Log.i(TAG, "电量已写入 Settings.Global: L${left.battery},R${right.battery}")
+                Log.i(TAG, "电量已写入 Settings.Global: L${left.battery} R${right.battery} C${case.battery} connL=${left.isConnected} connR=${right.isConnected}")
                 runCatching {
                     historyAndLowBattery(
                         ctx,

@@ -33,7 +33,7 @@ import kotlin.concurrent.thread
 object SystemUIHeadsetIconHook : HookContext() {
     private const val TAG = "MagicOriG-SystemUI"
 
-    /** 读跨进程电量（"L90,R85"）→ "左耳 90% 右耳 85%"；无数据返回原文占位 */
+    /** 读跨进程电量（"L90,R85,C70" 三段）→ "左耳 90% 右耳 85%"；无数据返回原文占位 */
     private fun readBatteryLine(): String = runCatching {
         val app = Class.forName("android.app.ActivityThread")
             .getDeclaredMethod("currentApplication").invoke(null) as? android.content.Context
@@ -41,20 +41,70 @@ object SystemUIHeadsetIconHook : HookContext() {
         val raw = android.provider.Settings.Global.getString(app.contentResolver, "magicorig_battery")
             ?: return "左耳 --% 右耳 --%"
         if (!raw.contains(",")) return "左耳 --% 右耳 --%"
-        val l = raw.substringBefore(',').removePrefix("L").toIntOrNull()
-        val r = raw.substringAfter(',').removePrefix("R").toIntOrNull()
-        val ls = if (l != null && l >= 0) "左耳 $l%" else "左耳 --%"
-        val rs = if (r != null && r >= 0) "右耳 $r%" else "右耳 --%"
+        // 逐段按前缀解析（同 EarphoneDetailActivity.parseBattery 口径）。
+        // 写入端恒为三段，旧写法 substringAfter(',') 取右耳会把 ",C90"
+        // 粘进 R 段 → 解析失败、右耳永远 --%（服务卡 v2.10.6 修的是同款 bug）。
+        var l: Int? = null
+        var r: Int? = null
+        for (seg in raw.split(',')) {
+            val s = seg.trim()
+            when {
+                s.startsWith("L") -> l = s.removePrefix("L").toIntOrNull()
+                s.startsWith("R") -> r = s.removePrefix("R").toIntOrNull()
+            }
+        }
+        val lv = l
+        val rv = r
+        val ls = if (lv != null && lv >= 0) "左耳 $lv%" else "左耳 --%"
+        val rs = if (rv != null && rv >= 0) "右耳 $rv%" else "右耳 --%"
         "$ls $rs"
     }.getOrDefault("左耳 --% 右耳 --%")
 
     private fun currentDisplayName(): String =
         runCatching { PodIdentity.current().displayName }.getOrDefault(PodProfiles.FREE4.displayName)
 
-    /** 占位文案换成当前机型名；已经是任一支持机型的名字时换成电量行。 */
-    private fun rewriteAudioLabel(text: String): String? = when {
+    // 播控门控核对日志去重：文本+祖先链签名，只打前 20 条不同的
+    private val REWRITE_CHAIN_LOGGED = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+    private val REWRITE_CHAIN_TOTAL = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** 沿 view 的 parent 链向上收集祖先类名（≤12 层，含 view 自身一层）。 */
+    private fun ancestorChain(view: android.view.View?): List<String> {
+        val out = ArrayList<String>(12)
+        var cur: Any? = view
+        while (cur is android.view.View && out.size < 12) {
+            out.add(cur.javaClass.name)
+            cur = cur.parent
+        }
+        return out
+    }
+
+    /**
+     * 占位文案换成当前机型名；已经是任一支持机型的名字时换成电量行。
+     * ★ 例外（v2.10.9）：媒体输出选择器（播控）的设备行要显示设备名——
+     * view 祖先链含 MediaOutput/OutputSwitcher 时跳过机型名→电量行改写。
+     */
+    private fun rewriteAudioLabel(text: String, view: android.view.View? = null): String? = when {
         text == "当前音频输入输出设备" -> currentDisplayName()
-        PodProfiles.ALL.any { it.displayName == text } -> readBatteryLine()
+        PodProfiles.ALL.any { it.displayName == text } -> {
+            val chain = ancestorChain(view)
+            if (chain.isNotEmpty()) {
+                val sig = "$text|${chain.joinToString(">")}"
+                if (REWRITE_CHAIN_LOGGED.putIfAbsent(sig, true) == null &&
+                    REWRITE_CHAIN_TOTAL.incrementAndGet() <= 20
+                ) {
+                    Log.i(TAG, "改写祖先链: '$text' <- ${chain.joinToString(" <- ")}")
+                }
+            }
+            if (chain.any {
+                    it.contains("MediaOutput", ignoreCase = true) ||
+                        it.contains("OutputSwitcher", ignoreCase = true)
+                }
+            ) {
+                null
+            } else {
+                readBatteryLine()
+            }
+        }
         else -> null
     }
     private const val SLOT = "wireless_headset"
@@ -95,7 +145,7 @@ object SystemUIHeadsetIconHook : HookContext() {
                         fun walk(v: android.view.View) {
                             if (v is android.widget.TextView) {
                                 val cur = v.text?.toString() ?: ""
-                                val out = rewriteAudioLabel(cur)
+                                val out = rewriteAudioLabel(cur, v)
                                 if (out != null) {
                                     v.text = out
                                     changed++
@@ -128,7 +178,7 @@ object SystemUIHeadsetIconHook : HookContext() {
             }.apply { isAccessible = true }
             module.hook(m).intercept { chain ->
                 val t = (chain.args.getOrNull(0) as? CharSequence)?.toString()
-                val out = t?.let { rewriteAudioLabel(it) }
+                val out = t?.let { rewriteAudioLabel(it, chain.thisObject as? android.view.View) }
                 if (t != null && out != null) {
                     Log.w(TAG, "★★★★ TextView.setText 改写: '$t' → '$out'")
                     val newArgs = chain.args.toTypedArray()

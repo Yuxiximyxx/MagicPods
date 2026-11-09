@@ -50,13 +50,13 @@ jobs:
           mkdir -p dist
           SRC=$(ls app/build/outputs/apk/release/*.apk | head -1)
           echo "release apk: $SRC"
-          cp "$SRC" dist/MagicPods-2.10.8-release.apk
+          cp "$SRC" dist/MagicPods-2.10.9-release.apk
           ls -lh dist
 
       - name: Verify signature
         run: |
           SDK=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          "$SDK/apksigner" verify --print-certs dist/MagicPods-2.10.8-release.apk
+          "$SDK/apksigner" verify --print-certs dist/MagicPods-2.10.9-release.apk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -68,40 +68,45 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.10.8
-          name: MagicPods 2.10.8
+          tag_name: v2.10.9
+          name: MagicPods 2.10.9
           body: |
-            ## MagicPods 2.10.8（卡头图标换入耳式 + 隐藏卡头单值电量）
+            ## MagicPods 2.10.9（右耳电量三处解析修复 + 播控设备名保留）
 
-            v2.10.7 真机结论：电量线收口——控制中心服务卡 L100/R100/
-            仓90 三段齐（setChargerPower + POWER_ABILITY_CHARGER）。
-            卡头图标也已定名：卡视图树转储显示，DeviceServiceCardView
-            里那张 504×504 的 BitmapDrawable 的 ConstantState 命中
-            宿主资源 device_icon_default_earphone（与球的 initIcon
-            取的是同一张），画的是头戴式；宿主自带入耳版
-            device_icon_in_ear_earphone_shadow。
+            小乐 01:32 五张截图实证：灵动胶囊、音频切换通知、
+            播控中心与蓝牙列表的电量行、以及模块页都只显示
+            「左耳 100% 右耳 --%」。根因与服务卡 v2.10.6 修掉的
+            是同款两段解析 bug——跨进程电量通道 magicorig_battery
+            现在恒为三段 "L100,R100,C90"，旧写法
+            raw.substringAfter(',').removePrefix("R") 取右耳会
+            得到 "100,C90" 解析失败，右耳永远缺失。
 
-            本版两处改动，都在控制中心进程、且只对本机 Free4 的卡生效：
+            本版改动：
 
-            - 先定绑定：沿用 v2.10.7 的卡构造/init hook 与 300ms 后
-              视图树转储，反射读卡实例的 declared fields，找
-              DeviceInfo 对象与其中的 MAC/设备名字段并逐项打日志；
-              只有绑定确认是本机 Free4（MAC 88:92:CC:E5:00:8D 或
-              名字 OPPO Enco Free4）才执行下面两处改动，读不到
-              绑定就只记日志、不改任何东西。
-            - 卡头图标替换：遍历卡视图树，把 drawable ConstantState
-              与 device_icon_default_earphone 相同的 ImageView，
-              换成宿主的 device_icon_in_ear_earphone_shadow
-              （按 entry 名查 id），日志打「卡头图标已替换为 in_ear」。
-            - 隐藏卡头单值电量：三段齐后名字旁的「电池图标+100%」
-              显得多余——在视图树前部、噪声控制 section 之前定位
-              第一组单值电量（BatteryLevelView/图标 + ^\d+%$ 文本），
-              整组（或其只含这两者的父容器）设为 GONE 并记日志；
-              电量段内的 L/R/仓三段绝不动。
+            - 三处解析统一改成逐段按 L/R/C 前缀取值（同
+              EarphoneDetailActivity.parseBattery 口径）：
+              SystemUIHeadsetIconHook.readBatteryLine()、
+              MediaSwsBatteryHook.readBatteryPair()、
+              ControlCenterNoiseHook.batteryLevelForCard()
+              （第三处旧写法让 r 恒 null、卡片均值退化成只取左值）。
+            - 播控中心设备名保留：SystemUIHeadsetIconHook
+              .rewriteAudioLabel 原先把任何文本恰等于机型名的
+              TextView 都换成电量行，媒体输出选择器的设备行也
+              因此丢了名字。改写前先沿 TextView 的 parent 链
+              向上收集祖先类名（≤12 层），任一含 MediaOutput
+              或 OutputSwitcher 就跳过改写；每次命中把祖先链
+              打一行日志（按文本+链签名去重、封顶 20 条）便于
+              下一轮核对门控覆盖。
+            - 写入端留痕：RfcommController 写 magicorig_battery
+              的日志补全为 L/R/C 三值与左右 isConnected
+              （「电量已写入 Settings.Global: Lx Ry Cz
+              connL=.. connR=..」）。模块页同一时刻右耳显示 "?"
+              说明那一刻写入端 R 值本身可能为 0，本版只加日志
+              不改写入逻辑，等日志坐实再动。
 
-            v2.10.7 的潜行与转储全部保留；SystemUI 进程不做视图
-            改动。与 2.10.1–2.10.7 同一签名，可直接覆盖安装。
-            装好后强停一次控制中心进程（或重连耳机），打开 Free4
-            服务卡验证：卡头应为入耳式图标、名字旁不再有单值
-            电量、L/R/仓三段保留。
+            v2.10.8 的卡头图标替换与隐藏单值电量原样保留。
+            与 2.10.1–2.10.8 同一签名，可直接覆盖安装。装好后
+            重连耳机（让 SystemUI/蓝牙进程跑新代码），验证：
+            胶囊、通知、播控电量行应显示右耳数值，播控的设备
+            行应显示设备名。
           files: dist/*.apk

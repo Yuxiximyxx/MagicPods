@@ -33,7 +33,7 @@ object MediaSwsBatteryHook : HookContext() {
         )
     }
 
-    /** "L90,R85" → "左耳 90% 右耳 85%"（保留备用；SystemUI 层有同款实现） */
+    /** "L90,R85,C70" → "左耳 90% 右耳 85%"（保留备用；SystemUI 层有同款实现） */
     @Suppress("unused")
     private fun readBatteryPair(): String {
         return try {
@@ -43,8 +43,18 @@ object MediaSwsBatteryHook : HookContext() {
             val raw = android.provider.Settings.Global.getString(app.contentResolver, "magicorig_battery")
                 ?: return ""
             if (!raw.contains(",")) return ""
-            val left = raw.substringBefore(',').removePrefix("L").toIntOrNull() ?: -1
-            val right = raw.substringAfter(',').removePrefix("R").toIntOrNull() ?: -1
+            // 逐段按前缀解析：写入端恒为三段 "L100,R100,C90"，旧写法
+            // substringAfter(',') 取右耳会把 ",C90" 粘进 R 段 → 右耳恒 -1
+            // （同款 bug，v2.10.9 一并修，与 EarphoneDetailActivity.parseBattery 同口径）。
+            var left = -1
+            var right = -1
+            for (seg in raw.split(',')) {
+                val s = seg.trim()
+                when {
+                    s.startsWith("L") -> left = s.removePrefix("L").toIntOrNull() ?: -1
+                    s.startsWith("R") -> right = s.removePrefix("R").toIntOrNull() ?: -1
+                }
+            }
             val l = if (left >= 0) "左耳 $left%" else ""
             val r = if (right >= 0) "右耳 $right%" else ""
             "$l $r".trim()
