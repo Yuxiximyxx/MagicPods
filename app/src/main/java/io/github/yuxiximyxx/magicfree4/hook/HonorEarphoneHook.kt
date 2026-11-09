@@ -60,6 +60,13 @@ object HonorEarphoneHook : HookContext() {
     private val FILE_SNOOP_PATH_COUNTS =
         java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger>()
 
+    // 观察点 14e（v2.10.5 侦察）：资源层潜行——线程级重入守卫、全栈总量计数
+    // （封顶 60 条）、按 (入口,id) 分别计数（每对只打前 2 次全栈，之后只计数）。
+    private val RES_SNOOP_GUARD = ThreadLocal.withInitial { false }
+    private val RES_SNOOP_STACK_TOTAL = java.util.concurrent.atomic.AtomicInteger(0)
+    private val RES_SNOOP_PAIR_COUNTS =
+        java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger>()
+
     override fun onHook() {
         Log.i(TAG, "onHook start pkg=$packageName")
 
@@ -299,7 +306,23 @@ object HonorEarphoneHook : HookContext() {
                 val mac = chain.args.getOrNull(0)
                 val original = chain.proceed()
                 if (original != null) {
-                    Log.i(TAG, "b2.a.getDeviceInfo(mac=$mac) => bundle 非空 size=${(original as? android.os.Bundle)?.size()}  [保持原样]")
+                    // v2.10.5 增强：非空时把全部 key+value 逐行转储（value 截断
+                    // 120 字符）。副线取证：magicorig_battery 全局值三段齐全
+                    // （L100,R100,C90），卡却只显示单个值——要看清这个包里
+                    // 电量到底以什么 key、几个值躺着，下一版才知道往哪补。
+                    val bundle = original as? android.os.Bundle
+                    Log.i(TAG, "b2.a.getDeviceInfo(mac=$mac) => bundle 非空 size=${bundle?.size()}  [保持原样]")
+                    if (bundle != null) {
+                        runCatching {
+                            for (key in bundle.keySet()) {
+                                @Suppress("DEPRECATION")
+                                val v = bundle.get(key)
+                                Log.i(TAG, "b2.a.getDeviceInfo(mac=$mac) 字段 $key = ${v.toString().take(120)}")
+                            }
+                        }.onFailure {
+                            Log.w(TAG, "b2.a.getDeviceInfo(mac=$mac) 字段转储失败: ${it.javaClass.simpleName}: ${it.message}")
+                        }
+                    }
                     original
                 } else {
                     // 实测原本恒为 null。反汇编 b2.a.d 拿到它写入的 key：
@@ -317,7 +340,7 @@ object HonorEarphoneHook : HookContext() {
                     }
                 }
             }
-            Log.i(TAG, "installed: b2.a.d(String)  [getDeviceInfo null → 空 Bundle]")
+            Log.i(TAG, "installed: b2.a.d(String)  [getDeviceInfo：非空全字段转储 / null → 合成 Bundle]")
         }.onFailure {
             Log.w(TAG, "install b2.a.d failed: ${it.javaClass.simpleName}: ${it.message}")
         }
@@ -455,6 +478,28 @@ object HonorEarphoneHook : HookContext() {
             Log.w(TAG, "install Activity.onResume 标记 failed: ${it.javaClass.simpleName}: ${it.message}")
         }
 
+        // ── 观察点 14e（v2.10.5 侦察）：资源层潜行 + 活动标记补强 ──
+        // v2.10.4 文件潜行实证：AAM 整场只 decode 了一个图片文件（capsule
+        // 的 VRDK#0.png），详情卡画图不走任何文件 API；assets 无 Third 图、
+        // 数据目录无资源包、deviceImageUrl 为空——头戴图只能是 AAM 内置
+        // 的资源 drawable，经 Resources 原生加载。本版改盯资源层：
+        // ImageView.setImageResource / Resources.getDrawable /
+        // Context.getDrawable，命中就把 id 解析成 type/entry 名连栈打出，
+        // 那张头戴 drawable 的真名会自己报出来。R$drawable 菜单枚举在
+        // 发现线程里顺带做（见 dumpRDrawableMenu）。纯观察不改写。
+        runCatching {
+            installResourceSnoop()
+        }.onFailure {
+            Log.e(TAG, "install 资源潜行 failed: ${it.javaClass.simpleName}: ${it.message}")
+        }
+        // v2.10.4 的 onResume 标记真机未触发（原因未明），补 onCreate 与
+        // onPostResume 两个时点，务必把「卡打开」的时间窗钉住。
+        runCatching {
+            installActivityLifecycleMarkers()
+        }.onFailure {
+            Log.w(TAG, "install Activity 生命周期标记 failed: ${it.javaClass.simpleName}: ${it.message}")
+        }
+
         Log.i(TAG, "onHook done pkg=$packageName")
     }
 
@@ -507,6 +552,14 @@ object HonorEarphoneHook : HookContext() {
         } else {
             Log.i(TAG, "近似类名扫描命中（${near.size}）: ${near.take(50).joinToString()}")
         }
+
+        // v2.10.5：顺带把宿主 R$drawable 的字段菜单打出来——详情卡那张
+        // 头戴图是内置 drawable，先拿到全量候选名录，下轮对着资源潜行
+        // 命中的 entry 名就能确认改哪一个。失败只记日志，不影响主流程。
+        runCatching { dumpRDrawableMenu(all) }
+            .onFailure {
+                Log.w(TAG, "R\$drawable 菜单枚举失败: ${it.javaClass.simpleName}: ${it.message}")
+            }
 
         val candidates = all
             .filter { it.substringAfterLast('.') == "ImageLoadUtils" }
@@ -924,6 +977,252 @@ object HonorEarphoneHook : HookContext() {
         }
         Log.i(TAG, "installed: Activity.onResume 时间窗标记 [对齐文件潜行时间窗]")
     }
+
+    /**
+     * 观察点 14e：资源层潜行装载——hook 四组入口：
+     * ImageView.setImageResource(int)、Resources.getDrawable(int) 与
+     * (int, Theme)、Context.getDrawable(int)；宿主 classloader 里有
+     * AppCompatImageView 时它的 setImageResource 也一并 hook（其覆写会
+     * 绕过基类方法）。能装几个装几个、逐个记成败，一个都没装上才抛错。
+     * 纯观察：命中与否都原样 proceed，返回值一律不改。
+     */
+    private fun installResourceSnoop() {
+        var hooked = 0
+
+        runCatching {
+            val m = findClass("android.widget.ImageView")
+                .getDeclaredMethod("setImageResource", Int::class.javaPrimitiveType)
+            m.isAccessible = true
+            module.hook(m).intercept { chain ->
+                val id = chain.args.getOrNull(0) as? Int
+                if (id != null) {
+                    val res = (chain.thisObject as? android.widget.ImageView)?.resources
+                    onResourceSnoopHit("ImageView.setImageResource", res, id)
+                }
+                chain.proceed()
+            }
+            hooked++
+            Log.i(TAG, "资源潜行装载: ImageView.setImageResource(int) OK")
+        }.onFailure {
+            Log.w(TAG, "资源潜行装载: ImageView.setImageResource(int) 失败: ${it.javaClass.simpleName}: ${it.message}")
+        }
+
+        runCatching {
+            val resCls = findClass("android.content.res.Resources")
+            val themeCls = findClass("android.content.res.Resources\$Theme")
+            for (m in listOf(
+                resCls.getDeclaredMethod("getDrawable", Int::class.javaPrimitiveType),
+                resCls.getDeclaredMethod("getDrawable", Int::class.javaPrimitiveType, themeCls)
+            )) {
+                m.isAccessible = true
+                module.hook(m).intercept { chain ->
+                    val id = chain.args.getOrNull(0) as? Int
+                    if (id != null) {
+                        onResourceSnoopHit(
+                            "Resources.getDrawable", chain.thisObject as? android.content.res.Resources, id
+                        )
+                    }
+                    chain.proceed()
+                }
+                hooked++
+            }
+            Log.i(TAG, "资源潜行装载: Resources.getDrawable(int)/(int,Theme) OK")
+        }.onFailure {
+            Log.w(TAG, "资源潜行装载: Resources.getDrawable 失败: ${it.javaClass.simpleName}: ${it.message}")
+        }
+
+        runCatching {
+            val m = findClass("android.content.Context")
+                .getDeclaredMethod("getDrawable", Int::class.javaPrimitiveType)
+            m.isAccessible = true
+            module.hook(m).intercept { chain ->
+                val id = chain.args.getOrNull(0) as? Int
+                if (id != null) {
+                    val res = (chain.thisObject as? android.content.Context)?.resources
+                    onResourceSnoopHit("Context.getDrawable", res, id)
+                }
+                chain.proceed()
+            }
+            hooked++
+            Log.i(TAG, "资源潜行装载: Context.getDrawable(int) OK")
+        }.onFailure {
+            Log.w(TAG, "资源潜行装载: Context.getDrawable(int) 失败: ${it.javaClass.simpleName}: ${it.message}")
+        }
+
+        // AppCompatImageView 覆写了 setImageResource，基类 hook 抓不到走
+        // 它的调用；宿主没有这个类（纯原生 UI）就记一行跳过，不算失败。
+        runCatching {
+            val cls = findClass("androidx.appcompat.widget.AppCompatImageView")
+            val m = cls.getDeclaredMethod("setImageResource", Int::class.javaPrimitiveType)
+            m.isAccessible = true
+            module.hook(m).intercept { chain ->
+                val id = chain.args.getOrNull(0) as? Int
+                if (id != null) {
+                    val res = (chain.thisObject as? android.view.View)?.resources
+                    onResourceSnoopHit("AppCompatImageView.setImageResource", res, id)
+                }
+                chain.proceed()
+            }
+            hooked++
+            Log.i(TAG, "资源潜行装载: AppCompatImageView.setImageResource(int) OK")
+        }.onFailure {
+            Log.i(TAG, "资源潜行装载: AppCompatImageView 不存在或装载失败，跳过: ${it.javaClass.simpleName}: ${it.message}")
+        }
+
+        Log.i(TAG, "installed: 资源潜行（$hooked 个入口）[setImageResource/getDrawable]")
+        if (hooked == 0) throw IllegalStateException("资源潜行一个入口都没装上")
+    }
+
+    /**
+     * 资源潜行命中处理：先用宿主 Resources 把 id 解析成 type/entry 名
+     * （解析失败记原始 hex id），再按 (入口,id) 去重——每对只打前 2 次
+     * 全栈、全栈总量封顶 60 条，之后只计数汇总。打栈时滤框架/本模块帧，
+     * 最多 25 帧——第一个宿主帧就是决定加载这张 drawable 的代码。
+     * 全程持 RES_SNOOP_GUARD，模块自己的日志输出不会递归触发潜行；
+     * 本函数只记日志，宿主行为由调用点原样 proceed。
+     */
+    private fun onResourceSnoopHit(entry: String, res: android.content.res.Resources?, id: Int) {
+        if (RES_SNOOP_GUARD.get() == true) return
+        // id=0 是「清图」调用，无信息量，直接放过不记。
+        if (id == 0) return
+        val key = "$entry|0x${Integer.toHexString(id)}"
+        val count = RES_SNOOP_PAIR_COUNTS
+            .computeIfAbsent(key) { java.util.concurrent.atomic.AtomicInteger(0) }
+            .incrementAndGet()
+        val full = count <= 2 && RES_SNOOP_STACK_TOTAL.get() < 60
+        if (!full && count != 3 && count % 50 != 0) return
+        RES_SNOOP_GUARD.set(true)
+        try {
+            if (full) {
+                val n = RES_SNOOP_STACK_TOTAL.incrementAndGet()
+                val name = resolveDrawableName(res, id)
+                Log.i(TAG, "资源潜行命中 #$n $entry → $name（该入口+id 第 $count 次）")
+                val frames = Throwable().stackTrace.filter { st ->
+                    val cn = st.className
+                    !cn.startsWith("android.") &&
+                        !cn.startsWith("androidx.") &&
+                        !cn.startsWith("java.") &&
+                        !cn.startsWith("io.github.yuxiximyxx.magicfree4") &&
+                        !cn.startsWith("io.github.libxposed") &&
+                        !cn.startsWith("org.lsposed") &&
+                        cn != "java.lang.Thread"
+                }.take(25)
+                for ((idx, st) in frames.withIndex()) {
+                    Log.i(TAG, "资源潜行栈 #$n [$idx] ${st.className}.${st.methodName}")
+                }
+            } else {
+                Log.i(TAG, "资源潜行计数 $entry id=0x${Integer.toHexString(id)} 已达 $count 次（每对只打前 2 次全栈，全栈封顶 60 条）")
+            }
+        } finally {
+            RES_SNOOP_GUARD.set(false)
+        }
+    }
+
+    /** 用宿主 Resources 把 drawable id 解析成 "type/entry (0xid)"；
+     *  Resources 缺失或名称解析抛异常时退回原始 hex id，绝不抛错。 */
+    private fun resolveDrawableName(res: android.content.res.Resources?, id: Int): String {
+        val hex = "0x${Integer.toHexString(id)}"
+        if (res == null) return "id=$hex（无 Resources 可解析）"
+        val type = runCatching { res.getResourceTypeName(id) }.getOrNull()
+        val entry = runCatching { res.getResourceEntryName(id) }.getOrNull()
+        return if (type != null && entry != null) {
+            "$type/$entry ($hex)"
+        } else {
+            "id=$hex（名称解析失败）"
+        }
+    }
+
+    /**
+     * v2.10.5：R$drawable 菜单枚举——在 dex 发现线程里调用（入参是三路
+     * 枚举的并集类名）。找类名以 R$drawable 结尾的类，反射读其全部
+     * public static int 字段（aapt 的 R 字段约定），字段名含
+     * ear/head/device/third/common/icon/buds/pod（忽略大小写）的逐行
+     * 打日志（封顶 200 行），并记总字段数与命中数。找不到 R$drawable
+     * 类记一行；单个类读失败只记 Log.w，不影响其余类。
+     */
+    private fun dumpRDrawableMenu(allClassNames: List<String>) {
+        val rClasses = allClassNames.filter { it.endsWith("R\$drawable") }.distinct()
+        if (rClasses.isEmpty()) {
+            Log.i(TAG, "R\$drawable 菜单: dex 类名里没有以 R\$drawable 结尾的类")
+            return
+        }
+        Log.i(TAG, "R\$drawable 菜单: 发现 ${rClasses.size} 个 R\$drawable 类: ${rClasses.take(10).joinToString()}")
+        val keywords = listOf("ear", "head", "device", "third", "common", "icon", "buds", "pod")
+        var totalFields = 0
+        val hits = mutableListOf<String>()
+        for (name in rClasses) {
+            runCatching {
+                val cls = findClass(name)
+                for (f in cls.declaredFields) {
+                    val mods = f.modifiers
+                    if (!java.lang.reflect.Modifier.isPublic(mods) ||
+                        !java.lang.reflect.Modifier.isStatic(mods) ||
+                        f.type != Int::class.javaPrimitiveType
+                    ) continue
+                    totalFields++
+                    val fname = f.name
+                    if (keywords.any { fname.contains(it, ignoreCase = true) }) {
+                        val value = runCatching {
+                            f.isAccessible = true
+                            "0x${Integer.toHexString(f.getInt(null))}"
+                        }.getOrNull() ?: "?"
+                        hits.add("$name.$fname = $value")
+                    }
+                }
+            }.onFailure {
+                Log.w(TAG, "R\$drawable 菜单: 读 $name 失败: ${it.javaClass.simpleName}: ${it.message}")
+            }
+        }
+        Log.i(TAG, "R\$drawable 菜单: 共 $totalFields 个 public static int 字段，关键字命中 ${hits.size} 个")
+        for ((i, line) in hits.take(200).withIndex()) {
+            Log.i(TAG, "R\$drawable 候选[${i + 1}/${hits.size}]: $line")
+        }
+        if (hits.size > 200) {
+            Log.i(TAG, "R\$drawable 菜单: 命中数超 200，只打了前 200 行")
+        }
+    }
+
+    /**
+     * v2.10.5 活动标记补强：v2.10.4 的 onResume 标记真机未触发（原因
+     * 未明），补 hook Activity.onCreate(Bundle) 与 onPostResume()——
+     * 同样只在 proceed 前记一行「类名 @ 毫秒时间戳」，与 onResume 标记
+     * 互为冗余，务必把详情卡打开的时间窗钉住。纯观察，不改行为。
+     */
+    private fun installActivityLifecycleMarkers() {
+        var hooked = 0
+        runCatching {
+            val m = findClass("android.app.Activity")
+                .getDeclaredMethod("onCreate", android.os.Bundle::class.java)
+            m.isAccessible = true
+            module.hook(m).intercept { chain ->
+                runCatching {
+                    val name = chain.thisObject?.javaClass?.name ?: "?"
+                    Log.i(TAG, "Activity.onCreate 标记: $name @ ${System.currentTimeMillis()}")
+                }
+                chain.proceed()
+            }
+            hooked++
+        }.onFailure {
+            Log.w(TAG, "Activity.onCreate 标记装载失败: ${it.javaClass.simpleName}: ${it.message}")
+        }
+        runCatching {
+            val m = findClass("android.app.Activity").getDeclaredMethod("onPostResume")
+            m.isAccessible = true
+            module.hook(m).intercept { chain ->
+                runCatching {
+                    val name = chain.thisObject?.javaClass?.name ?: "?"
+                    Log.i(TAG, "Activity.onPostResume 标记: $name @ ${System.currentTimeMillis()}")
+                }
+                chain.proceed()
+            }
+            hooked++
+        }.onFailure {
+            Log.w(TAG, "Activity.onPostResume 标记装载失败: ${it.javaClass.simpleName}: ${it.message}")
+        }
+        Log.i(TAG, "installed: Activity 生命周期标记补强（$hooked/2）[onCreate/onPostResume]")
+        if (hooked == 0) throw IllegalStateException("Activity 生命周期标记一个都没装上")
+    }
+
 
     /** 枚举宿主 ClassLoader 里全部 dex 的类名（反射读 pathList → dexElements → dexFile）。 */
 
