@@ -51,6 +51,8 @@ object ControlCenterNoiseHook : HookContext() {
             Log.w(TAG, "BatteryData 方法面转储外层失败: ${it.javaClass.simpleName}: ${it.message}")
         }
         // ── 0b) v2.10.7 侦察：卡头图标定名（setImageDrawable 成品层 + 卡视图树转储）──
+        //    v2.10.8 接续：转储后在控制中心进程做卡头修复（绑定确认是本机
+        //    Free4 才动：图标换入耳式 + 隐藏卡头单值电量），见 applyCardHeaderFixes。
         runCatching { installCardIconSnoop() }.onFailure {
             Log.e(TAG, "install 卡头图标定名 failed: ${it.javaClass.simpleName}: ${it.message}")
         }
@@ -1971,6 +1973,12 @@ object ControlCenterNoiseHook : HookContext() {
             android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
                 runCatching { dumpCardTree(card) }
                     .onFailure { Log.w(TAG, "卡视图树转储失败: ${it.javaClass.simpleName}: ${it.message}") }
+                // v2.10.8：转储后接卡头修复——只在控制中心进程做视图改动，
+                // 且绑定确认是本机 Free4 才动（判定在 applyCardHeaderFixes 内）。
+                if (packageName == "com.hihonor.controlcenter") {
+                    runCatching { applyCardHeaderFixes(card) }
+                        .onFailure { Log.w(TAG, "卡头修复失败: ${it.javaClass.simpleName}: ${it.message}") }
+                }
             }, 300)
         }.onFailure {
             Log.w(TAG, "卡视图树转储排程失败: ${it.javaClass.simpleName}: ${it.message}")
@@ -2040,6 +2048,212 @@ object ControlCenterNoiseHook : HookContext() {
             for (i in 0 until v.childCount) {
                 dumpViewNode(v.getChildAt(i), candidates)
             }
+        }
+    }
+
+    // ── v2.10.8 卡头修复（仅控制中心进程）─────────────────────
+    // v2.10.7 视图树转储已把卡头图标定名：DeviceServiceCardView 里那张
+    // 504×504 的 BitmapDrawable，ConstantState 命中宿主资源
+    // device_icon_default_earphone——与球的 initIcon 取的是同一张，
+    // 画的是头戴式。宿主自带入耳版 device_icon_in_ear_earphone_shadow。
+    // 本节在转储之后接着做两处改动，且只在「绑定确认是本机 Free4」时动：
+    //   1) 卡头图标替换：ConstantState 与 default 相同的 ImageView，
+    //      drawable 换成 in_ear 版；
+    //   2) 隐藏卡头单值电量：三段电量齐后，名字旁「电池图标+100%」
+    //      显得多余——把这一组设为 GONE。只处理视图树前部、噪声控制
+    //      section 之前的第一组匹配，电量段内的 L/R/仓三段绝不动。
+    // 绑定读取：反射卡实例 declared fields（只走 com.hihonor 类层级，
+    // 避开 View/ViewGroup 的海量字段），找 DeviceInfo/LinkDevice 对象
+    // （再下钻一层）与其中的 String 字段（MAC / 设备名），逐项打日志；
+    // MAC 命中 ourMac()/88:92… 或名字含 OPPO Enco Free4 才算确认。
+    // 读不到绑定 → 只记日志、不改任何东西。
+    // SystemUI 进程不做视图改动（排程处按 packageName 把关）。
+
+    /** DFS 前序收集整棵视图树（改动定位与转储共用同一份顺序口径）。 */
+    private fun collectPreorder(root: android.view.View, out: MutableList<android.view.View>) {
+        out += root
+        if (root is android.view.ViewGroup) {
+            for (i in 0 until root.childCount) collectPreorder(root.getChildAt(i), out)
+        }
+    }
+
+    /**
+     * 读卡的设备绑定：反射卡实例的 declared fields（限 com.hihonor 类
+     * 层级），逐项把找到的 String 字段与 DeviceInfo/LinkDevice 对象的
+     * 下钻结果打日志（字段名+值）。返回 true = 绑定确认是本机 Free4。
+     */
+    private fun readCardBinding(card: Any): Boolean {
+        var bound = false
+        fun note(path: String, v: String) {
+            Log.i(TAG, "卡绑定字段: $path = $v")
+            if (isOurMac(v) || v.equals("88:92:CC:E5:00:8D", ignoreCase = true) ||
+                v.contains("OPPO Enco Free4")
+            ) {
+                bound = true
+            }
+        }
+        fun scan(obj: Any, depth: Int, path: String) {
+            var cls: Class<*>? = obj.javaClass
+            while (cls != null && cls.name.startsWith("com.hihonor")) {
+                for (f in cls.declaredFields) {
+                    if (java.lang.reflect.Modifier.isStatic(f.modifiers)) continue
+                    val v = runCatching {
+                        f.isAccessible = true
+                        f.get(obj)
+                    }.getOrNull() ?: continue
+                    val p = if (path.isEmpty()) f.name else "$path.${f.name}"
+                    when {
+                        v is String -> if (v.isNotBlank()) note(p, v)
+                        v is android.view.View -> Unit // 视图字段不下钻，避免扫进整棵树
+                        depth < 2 && (v.javaClass.name.contains("DeviceInfo") ||
+                            v.javaClass.name.contains("LinkDevice")) -> {
+                            Log.i(TAG, "卡绑定字段: $p -> ${v.javaClass.name}（下钻）")
+                            scan(v, depth + 1, p)
+                        }
+                    }
+                }
+                cls = cls.superclass
+            }
+        }
+        runCatching { scan(card, 0, "") }
+            .onFailure { Log.w(TAG, "卡绑定读取失败: ${it.javaClass.simpleName}: ${it.message}") }
+        Log.i(
+            TAG,
+            if (bound) "卡绑定判定: 本机 Free4 卡（执行卡头改动）"
+            else "卡绑定判定: 未确认本机卡（跳过卡头改动）"
+        )
+        return bound
+    }
+
+    /** 卡头修复总入口：绑定确认后才替换图标、隐藏卡头单值电量。 */
+    private fun applyCardHeaderFixes(card: android.view.View) {
+        if (!readCardBinding(card)) return
+        val ctx = card.context ?: return
+        val res = ctx.resources ?: return
+        val pkg = ctx.packageName
+        val all = mutableListOf<android.view.View>()
+        collectPreorder(card, all)
+
+        // ── 1) 卡头图标：default_earphone → in_ear_earphone_shadow ──
+        runCatching {
+            val defId = res.getIdentifier("device_icon_default_earphone", "drawable", pkg)
+            val inEarId = res.getIdentifier("device_icon_in_ear_earphone_shadow", "drawable", pkg)
+            if (defId == 0 || inEarId == 0) {
+                Log.w(
+                    TAG,
+                    "卡头图标替换跳过: 资源 id 缺失 def=0x${Integer.toHexString(defId)}" +
+                        " inEar=0x${Integer.toHexString(inEarId)}"
+                )
+            } else {
+                val defCs = res.getDrawable(defId, null)?.constantState
+                var replaced = 0
+                for (v in all) {
+                    if (v !is android.widget.ImageView) continue
+                    val cs = runCatching { v.drawable?.constantState }.getOrNull() ?: continue
+                    if (defCs != null && (cs === defCs || cs == defCs)) {
+                        val nd = runCatching { res.getDrawable(inEarId, null) }.getOrNull()
+                        if (nd != null) {
+                            v.setImageDrawable(nd)
+                            replaced++
+                        }
+                    }
+                }
+                if (replaced > 0) {
+                    Log.i(
+                        TAG,
+                        "卡头图标已替换为 in_ear: device_icon_default_earphone" +
+                            " → device_icon_in_ear_earphone_shadow（$replaced 处）"
+                    )
+                } else {
+                    Log.w(TAG, "卡头图标替换: 未找到 ConstantState 命中 default 的 ImageView")
+                }
+            }
+        }.onFailure {
+            Log.w(TAG, "卡头图标替换失败: ${it.javaClass.simpleName}: ${it.message}")
+        }
+
+        // ── 2) 隐藏卡头单值电量（图标+百分比一组）──
+        runCatching { hideHeaderBattery(all) }
+            .onFailure {
+                Log.w(TAG, "卡头电量隐藏失败: ${it.javaClass.simpleName}: ${it.message}")
+            }
+    }
+
+    /**
+     * 定位并隐藏卡头那组单值电量。在 DFS 前序里截到「噪声控制」section
+     * 之前为止（卡头区域），找第一组匹配：
+     *   - 锚点 = 第一个文本匹配 ^\d+%$ 的 TextView；
+     *   - 图标 = 与锚点同父的 BatteryLevelView / ImageView 兄弟；
+     *   - 前提：锚点父容器子树里只有这一个 % 文本（L/R/仓那行是三个，
+     *     天然被排除）；且只处理第一组，处理完即止。
+     * 两者同父且父容器只含这两者 → 隐藏父容器；否则逐个隐藏。
+     * 锚点找不到时退而取卡头区域第一个 BatteryLevelView 单独隐藏。
+     */
+    private fun hideHeaderBattery(all: List<android.view.View>) {
+        val pctRe = Regex("^\\d+%$")
+        val header = mutableListOf<android.view.View>()
+        for (v in all) {
+            if (v is android.widget.TextView &&
+                v.text?.toString()?.contains("噪声控制") == true
+            ) break
+            header += v
+        }
+        fun pctCountIn(subtree: android.view.View): Int {
+            var n = 0
+            val stack = mutableListOf(subtree)
+            while (stack.isNotEmpty()) {
+                val cur = stack.removeAt(stack.size - 1)
+                if (cur is android.widget.TextView &&
+                    pctRe.matches(cur.text?.toString()?.trim().orEmpty())
+                ) n++
+                if (cur is android.view.ViewGroup) {
+                    for (i in 0 until cur.childCount) stack += cur.getChildAt(i)
+                }
+            }
+            return n
+        }
+        fun hideOne(v: android.view.View, why: String) {
+            v.visibility = android.view.View.GONE
+            val txt = (v as? android.widget.TextView)?.text?.toString()
+            Log.i(
+                TAG,
+                "卡头电量已隐藏: ${v.javaClass.name}" +
+                    (if (txt != null) " text=$txt" else "") + "（$why）"
+            )
+        }
+        for (tv in header) {
+            if (tv !is android.widget.TextView) continue
+            if (!pctRe.matches(tv.text?.toString()?.trim().orEmpty())) continue
+            val parent = tv.parent as? android.view.ViewGroup ?: continue
+            if (pctCountIn(parent) != 1) continue // 三段电量行（多个 %）不是卡头那组
+            val icon = (0 until parent.childCount)
+                .map { parent.getChildAt(it) }
+                .firstOrNull {
+                    it !== tv && (it.javaClass.name ==
+                        "com.hihonor.controlviewnew.widget.BatteryLevelView" ||
+                        it is android.widget.ImageView)
+                }
+            if (icon != null && parent.childCount == 2) {
+                parent.visibility = android.view.View.GONE
+                Log.i(
+                    TAG,
+                    "卡头电量已隐藏: 父容器 ${parent.javaClass.name}" +
+                        "（仅含电量图标 ${icon.javaClass.name} + 百分比 \"${tv.text}\"）"
+                )
+            } else {
+                if (icon != null) hideOne(icon, "卡头电量图标")
+                hideOne(tv, "卡头电量百分比")
+            }
+            return
+        }
+        // 锚点缺失的兜底：卡头区域第一个 BatteryLevelView
+        val blv = header.firstOrNull {
+            it.javaClass.name == "com.hihonor.controlviewnew.widget.BatteryLevelView"
+        }
+        if (blv != null) {
+            hideOne(blv, "兜底：仅 BatteryLevelView")
+        } else {
+            Log.w(TAG, "卡头电量隐藏: 卡头区域未找到单值电量组")
         }
     }
 

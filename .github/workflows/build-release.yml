@@ -50,13 +50,13 @@ jobs:
           mkdir -p dist
           SRC=$(ls app/build/outputs/apk/release/*.apk | head -1)
           echo "release apk: $SRC"
-          cp "$SRC" dist/MagicPods-2.10.7-release.apk
+          cp "$SRC" dist/MagicPods-2.10.8-release.apk
           ls -lh dist
 
       - name: Verify signature
         run: |
           SDK=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          "$SDK/apksigner" verify --print-certs dist/MagicPods-2.10.7-release.apk
+          "$SDK/apksigner" verify --print-certs dist/MagicPods-2.10.8-release.apk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -68,35 +68,40 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.10.7
-          name: MagicPods 2.10.7
+          tag_name: v2.10.8
+          name: MagicPods 2.10.8
           body: |
-            ## MagicPods 2.10.7（仓电量正喂 + 卡头图标定名）
+            ## MagicPods 2.10.8（卡头图标换入耳式 + 隐藏卡头单值电量）
 
-            v2.10.6 真机结论：修好电量解析后，控制中心服务卡已显示
-            L/R 左右耳电量段、球位图标已是入耳式；剩两件——仓电量没
-            喂上、服务卡头部仍是头戴线条图标。本版一件修复、一件侦察。
+            v2.10.7 真机结论：电量线收口——控制中心服务卡 L100/R100/
+            仓90 三段齐（setChargerPower + POWER_ABILITY_CHARGER）。
+            卡头图标也已定名：卡视图树转储显示，DeviceServiceCardView
+            里那张 504×504 的 BitmapDrawable 的 ConstantState 命中
+            宿主资源 device_icon_default_earphone（与球的 initIcon
+            取的是同一张），画的是头戴式；宿主自带入耳版
+            device_icon_in_ear_earphone_shadow。
 
-            本版两件事：
+            本版两处改动，都在控制中心进程、且只对本机 Free4 的卡生效：
 
-            - 仓电量正喂（修复）：v2.10.6 转储的 BatteryData 方法面
-              实锤仓 setter 是 setChargerPower(int)，仓能力位是
-              POWER_ABILITY_CHARGER（=8）。v2.10.6 按候选名猜 setter
-              全部落空、误报「无仓电量接口」；本版改为 C 段存在时直调
-              setChargerPower(C)，能力位反射读 POWER_ABILITY_CHARGER
-              并入（读不到退回字面值 8），日志打「★★ 三段电量喂入:
-              左x 右y 仓z」。左/右喂法一字未动。
-            - 卡头图标定名（侦察）：v2.10.6 资源潜行只抓到球的
-              initIcon 取三张耳机默认图与卡创建期间的电量格图标——
-              卡头图标不走 Java 资源 API。本版改盯成品交付层：hook
-              ImageView.setImageDrawable/setImageBitmap 记 drawable
-              类名与调用栈；另 hook DeviceServiceCardView 构造/init，
-              完成后延迟转储整棵视图树，逐个 ImageView 的 drawable
-              用 ConstantState 与三个候选（default/in_ear/semi_in_ear，
-              按 entry 名从宿主资源表查 id）比对定名。
+            - 先定绑定：沿用 v2.10.7 的卡构造/init hook 与 300ms 后
+              视图树转储，反射读卡实例的 declared fields，找
+              DeviceInfo 对象与其中的 MAC/设备名字段并逐项打日志；
+              只有绑定确认是本机 Free4（MAC 88:92:CC:E5:00:8D 或
+              名字 OPPO Enco Free4）才执行下面两处改动，读不到
+              绑定就只记日志、不改任何东西。
+            - 卡头图标替换：遍历卡视图树，把 drawable ConstantState
+              与 device_icon_default_earphone 相同的 ImageView，
+              换成宿主的 device_icon_in_ear_earphone_shadow
+              （按 entry 名查 id），日志打「卡头图标已替换为 in_ear」。
+            - 隐藏卡头单值电量：三段齐后名字旁的「电池图标+100%」
+              显得多余——在视图树前部、噪声控制 section 之前定位
+              第一组单值电量（BatteryLevelView/图标 + ^\d+%$ 文本），
+              整组（或其只含这两者的父容器）设为 GONE 并记日志；
+              电量段内的 L/R/仓三段绝不动。
 
-            AAM 侧 HonorEarphoneHook 不动。与 2.10.1–2.10.6 同一签名，
-
-            可直接覆盖安装。装好后重启控制中心进程（或重连耳机），
-            打开一次控制中心服务卡，再导出 LSPosed 日志即可。
+            v2.10.7 的潜行与转储全部保留；SystemUI 进程不做视图
+            改动。与 2.10.1–2.10.7 同一签名，可直接覆盖安装。
+            装好后强停一次控制中心进程（或重连耳机），打开 Free4
+            服务卡验证：卡头应为入耳式图标、名字旁不再有单值
+            电量、L/R/仓三段保留。
           files: dist/*.apk
