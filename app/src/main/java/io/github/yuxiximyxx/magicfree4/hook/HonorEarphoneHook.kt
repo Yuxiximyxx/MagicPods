@@ -1,6 +1,7 @@
 package io.github.yuxiximyxx.magicfree4.hook
 
 import io.github.yuxiximyxx.magicfree4.utils.PodIdentity
+import io.github.libxposed.api.XposedInterface
 
 /**
  * HonorEarphoneHook — 荣耀耳机面板进程内的 MBB 协议观察点。
@@ -40,6 +41,12 @@ object HonorEarphoneHook : HookContext() {
     // 观察点 14：ImageLoadUtils 运行时发现的一次性守卫与重定向计数
     private val IMAGE_DISCOVERY_STARTED = java.util.concurrent.atomic.AtomicBoolean(false)
     private val IMAGE_REDIRECT_COUNT = java.util.concurrent.atomic.AtomicInteger(0)
+
+    // 观察点 14b（v2.10.2 侦察）：android.util.Log 潜行——命中计数、全栈打印上限、
+    // 线程级重入守卫（模块自己写日志若底层也走 android.util.Log，命中特征的
+    // 输出行不得在同一线程再次触发潜行）。
+    private val LOG_SNOOP_GUARD = ThreadLocal.withInitial { false }
+    private val LOG_SNOOP_HITS = java.util.concurrent.atomic.AtomicInteger(0)
 
     override fun onHook() {
         Log.i(TAG, "onHook start pkg=$packageName")
@@ -387,6 +394,18 @@ object HonorEarphoneHook : HookContext() {
             Log.e(TAG, "install ImageLoadUtils failed: ${it.javaClass.simpleName}: ${it.message}")
         }
 
+        // ── 观察点 14b（v2.10.2 侦察）：android.util.Log 潜行 ──
+        // v2.10.1 真机实证：dex 枚举里没有 simple name == ImageLoadUtils 的类
+        // ——AAM 是重混淆发行，"ImageLoadUtils" 只是它打日志时的 TAG 字符串。
+        // 本版潜伏在 android.util.Log 上：谁打出含 "ImageLoadUtils" / "res state"
+        // 的日志，就把它的调用栈打进模块日志，栈里第一个宿主帧的类全名就是
+        // 那个加载器的真名。纯观察，不改任何日志行为（见 installLogSnoop）。
+        runCatching {
+            installLogSnoop()
+        }.onFailure {
+            Log.e(TAG, "install Log 潜行 failed: ${it.javaClass.simpleName}: ${it.message}")
+        }
+
         Log.i(TAG, "onHook done pkg=$packageName")
     }
 
@@ -415,11 +434,30 @@ object HonorEarphoneHook : HookContext() {
      * 任何一步失败只记 Log.e，不影响现有功能。
      */
     private fun discoverAndHookImageLoadUtils() {
-        val candidates = enumerateDexClassNames()
+        // v2.10.2：枚举覆盖面留证——classloader pathList 与宿主 APK 文件
+        // （sourceDir + splitSourceDirs）两路都扫，各来源的条数由枚举函数
+        // 自己逐行打日志，最后取并集搜候选，下轮可据此确认到底扫了多少类。
+        val all = (enumerateDexClassNames() + enumerateApkFileClassNames()).distinct()
+        val total = all.size
+
+        // 近似类名扫描：simple name 含 ImageLoad（忽略大小写）、或以 Utils
+        // 结尾且含 Image——预期没有，记零也是证据。
+        val near = all.filter { name ->
+            val simple = name.substringAfterLast('.')
+            simple.contains("ImageLoad", ignoreCase = true) ||
+                (simple.endsWith("Utils") && simple.contains("Image"))
+        }
+        if (near.isEmpty()) {
+            Log.i(TAG, "近似类名扫描: simple name 含 ImageLoad / 以 Utils 结尾且含 Image 的类 = 0（共扫 $total 个类名）")
+        } else {
+            Log.i(TAG, "近似类名扫描命中（${near.size}）: ${near.take(50).joinToString()}")
+        }
+
+        val candidates = all
             .filter { it.substringAfterLast('.') == "ImageLoadUtils" }
             .distinct()
         if (candidates.isEmpty()) {
-            Log.e(TAG, "ImageLoadUtils 未发现：dex 枚举里没有 simple name == ImageLoadUtils 的类")
+            Log.e(TAG, "ImageLoadUtils 未发现：dex 枚举里没有 simple name == ImageLoadUtils 的类（共扫 $total 个类名）")
             return
         }
         Log.i(TAG, "ImageLoadUtils 候选（${candidates.size}）: ${candidates.joinToString()}")
@@ -464,6 +502,95 @@ object HonorEarphoneHook : HookContext() {
         Log.i(TAG, "ImageLoadUtils 重定向 hook 装载完成: $hooked/${methods.size} 个方法")
     }
 
+    /**
+     * 观察点 14b：给 android.util.Log 的 v/d/i/w/e 两个重载
+     * （(String,String) 与 (String,String,Throwable)，共 10 个）装潜行 hook。
+     * 同步装在 onHook 里，进程一起来就生效；单个重载装不上只记 Log.w，
+     * 一个都没装上才抛错让外层记 failed。
+     */
+    private fun installLogSnoop() {
+        val logClass = findClass("android.util.Log")
+        var hooked = 0
+        for (level in listOf("v", "d", "i", "w", "e")) {
+            for (withThrowable in listOf(false, true)) {
+                runCatching {
+                    val m = if (withThrowable) {
+                        logClass.getDeclaredMethod(
+                            level, String::class.java, String::class.java, Throwable::class.java
+                        )
+                    } else {
+                        logClass.getDeclaredMethod(level, String::class.java, String::class.java)
+                    }
+                    m.isAccessible = true
+                    module.hook(m).intercept { chain -> onSnoopedLog(chain) }
+                    hooked++
+                }.onFailure {
+                    val sig = if (withThrowable) "String,String,Throwable" else "String,String"
+                    Log.w(TAG, "Log 潜行 hook android.util.Log.$level($sig) 失败: ${it.javaClass.simpleName}: ${it.message}")
+                }
+            }
+        }
+        Log.i(TAG, "installed: Log 潜行 android.util.Log v/d/i/w/e（$hooked/10 个重载）")
+        if (hooked == 0) throw IllegalStateException("android.util.Log 潜行一个重载都没装上")
+    }
+
+    /** 潜行命中判定（廉价字符串 contains，命不中绝不取栈）：tag/msg 任一含
+     *  "ImageLoadUtils" 或 "res state"，或同时含 "Third" 与 "res"。 */
+    private fun isImageLoadLogLine(tag: String?, msg: String?): Boolean {
+        fun hit(s: String?): Boolean = s != null && (
+            s.contains("ImageLoadUtils") ||
+                s.contains("res state") ||
+                (s.contains("Third") && s.contains("res"))
+            )
+        return hit(tag) || hit(msg)
+    }
+
+    /**
+     * 潜行回调：命中特征时把 tag/msg 原文与当前调用栈（滤掉 android.util.Log、
+     * 本模块与 hook 框架帧，最多 25 帧）打进模块日志——栈里第一个宿主帧的
+     * 类全名就是打出 "ImageLoadUtils" 日志的加载器真名。前 12 次打全栈，
+     * 之后只计数、每 50 次汇总一行。模块自己的命中输出全程持线程级重入
+     * 守卫（LOG_SNOOP_GUARD），其日志行不会再次触发潜行。无论命中与否，
+     * 原日志调用一律照常 proceed，宿主行为不变。
+     */
+    private fun onSnoopedLog(chain: XposedInterface.Chain): Any? {
+        if (LOG_SNOOP_GUARD.get() == true) return chain.proceed()
+        val tag = chain.args.getOrNull(0) as? String
+        val msg = chain.args.getOrNull(1) as? String
+        if (!isImageLoadLogLine(tag, msg)) return chain.proceed()
+        val n = LOG_SNOOP_HITS.incrementAndGet()
+        when {
+            n <= 12 -> {
+                LOG_SNOOP_GUARD.set(true)
+                try {
+                    Log.i(TAG, "Log潜行命中 #$n tag=$tag msg=$msg")
+                    val frames = Throwable().stackTrace.filter { st ->
+                        val cn = st.className
+                        cn != "android.util.Log" &&
+                            !cn.startsWith("io.github.yuxiximyxx.magicfree4") &&
+                            !cn.startsWith("io.github.libxposed") &&
+                            !cn.startsWith("org.lsposed") &&
+                            cn != "java.lang.Thread"
+                    }.take(25)
+                    for ((idx, st) in frames.withIndex()) {
+                        Log.i(TAG, "Log潜行栈 #$n [$idx] ${st.className}.${st.methodName}")
+                    }
+                } finally {
+                    LOG_SNOOP_GUARD.set(false)
+                }
+            }
+            n % 50 == 0 -> {
+                LOG_SNOOP_GUARD.set(true)
+                try {
+                    Log.i(TAG, "Log潜行命中累计 $n 次（超 12 次后只计数汇总）")
+                } finally {
+                    LOG_SNOOP_GUARD.set(false)
+                }
+            }
+        }
+        return chain.proceed()
+    }
+
     /** 枚举宿主 ClassLoader 里全部 dex 的类名（反射读 pathList → dexElements → dexFile）。 */
     private fun enumerateDexClassNames(): List<String> {
         val names = LinkedHashSet<String>()
@@ -477,15 +604,68 @@ object HonorEarphoneHook : HookContext() {
             @Suppress("UNCHECKED_CAST")
             f.get(pathList) as Array<Any>
         }.getOrNull() ?: return emptyList()
-        for (element in elements) {
+        for ((index, element) in elements.withIndex()) {
             runCatching {
                 val f = element.javaClass.getDeclaredField("dexFile").apply { isAccessible = true }
                 val dexFile = f.get(element) as? dalvik.system.DexFile ?: return@runCatching
                 val entries = dexFile.entries()
-                while (entries.hasMoreElements()) names.add(entries.nextElement())
+                var count = 0
+                while (entries.hasMoreElements()) {
+                    names.add(entries.nextElement())
+                    count++
+                }
+                Log.i(TAG, "dex 来源[classloader#$index]: $count 个类名")
             }
         }
         Log.i(TAG, "dex 类名枚举完成: ${names.size} 个（elements=${elements.size}）")
+        return names.toList()
+    }
+
+    /**
+     * v2.10.2 枚举来源之二：宿主 App 的安装包文件本体——经 ActivityThread 取
+     * ApplicationInfo，把 sourceDir 与 splitSourceDirs 逐个用 DexFile 打开
+     * 枚举，每个来源单独记一行条数。取不到 ApplicationInfo / 单个文件打开
+     * 失败都只记日志跳过，不影响 classloader 路径的枚举结果。
+     */
+    private fun enumerateApkFileClassNames(): List<String> {
+        val names = LinkedHashSet<String>()
+        val appInfo = runCatching {
+            val at = Class.forName("android.app.ActivityThread")
+            val app = at.getDeclaredMethod("currentApplication").invoke(null)
+                ?: return emptyList()
+            app.javaClass.getMethod("getApplicationInfo").invoke(app)
+        }.getOrNull()
+        if (appInfo == null) {
+            Log.w(TAG, "dex 来源[apk]: 取 ApplicationInfo 失败，跳过 APK 文件枚举")
+            return emptyList()
+        }
+        val paths = mutableListOf<String>()
+        runCatching {
+            appInfo.javaClass.getField("sourceDir").get(appInfo) as? String
+        }.getOrNull()?.let { paths.add(it) }
+        runCatching {
+            @Suppress("UNCHECKED_CAST")
+            appInfo.javaClass.getField("splitSourceDirs").get(appInfo) as? Array<String>
+        }.getOrNull()?.let { paths.addAll(it) }
+        if (paths.isEmpty()) {
+            Log.w(TAG, "dex 来源[apk]: sourceDir/splitSourceDirs 均为空，跳过 APK 文件枚举")
+            return emptyList()
+        }
+        for ((index, path) in paths.withIndex()) {
+            runCatching {
+                val dex = dalvik.system.DexFile(path)
+                val entries = dex.entries()
+                var count = 0
+                while (entries.hasMoreElements()) {
+                    names.add(entries.nextElement())
+                    count++
+                }
+                Log.i(TAG, "dex 来源[apk#$index] $path: $count 个类名")
+                runCatching { dex.close() }
+            }.onFailure {
+                Log.w(TAG, "dex 来源[apk#$index] $path 打开/枚举失败: ${it.javaClass.simpleName}: ${it.message}")
+            }
+        }
         return names.toList()
     }
 
