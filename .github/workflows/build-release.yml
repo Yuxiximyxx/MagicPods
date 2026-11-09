@@ -50,13 +50,13 @@ jobs:
           mkdir -p dist
           SRC=$(ls app/build/outputs/apk/release/*.apk | head -1)
           echo "release apk: $SRC"
-          cp "$SRC" dist/MagicPods-2.10.3-release.apk
+          cp "$SRC" dist/MagicPods-2.10.4-release.apk
           ls -lh dist
 
       - name: Verify signature
         run: |
           SDK=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          "$SDK/apksigner" verify --print-certs dist/MagicPods-2.10.3-release.apk
+          "$SDK/apksigner" verify --print-certs dist/MagicPods-2.10.4-release.apk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -68,23 +68,27 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.10.3
-          name: MagicPods 2.10.3
+          tag_name: v2.10.4
+          name: MagicPods 2.10.4
           body: |
-            ## MagicPods 2.10.3（判别实验版）
+            ## MagicPods 2.10.4（文件潜行侦察版）
 
-            v2.10.2 侦察版已抓到真凶链路：耳机卡的大图是 AAM 从 CDN 下载的
-            capsule 资源（…/HCEPBusiness/Third/uiconfig/0/capsule.webp|png），
-            下载器是混淆类 y0.f——"Third" 的这套资源在系统更新后是通用头戴图。
+            本版不修图标，只加侦察，为下一版定位「详情卡顶部产品图」到底
+            是谁、从哪个文件读出来的：
 
-            - 本版直接 hook y0.f 全部方法：String 实参里的 "Third"/"/Third/"
-              在下载前改写成 "FCPG"（入耳式那套），让它去拉正确的资源；
-              改写范围锁死在 y0.f 一个类内，其余功能一律不碰。
-            - capsule 到底喂球位图标还是详情卡顶部图标仍未定——这版就是
-              判别实验：装好后重启面板进程（强停「音频产品管家」或重连耳机），
-              分别看球位和详情卡的图标变没变。
-            - Log 潜行特征放宽（.webp / HCEPBusiness / Downloading 等），
-              dex 枚举补齐 APK 文件一路的日志。
+            - v2.10.3 已定案：capsule 资源只喂球位，Free4 的 capsule 键是
+              VRDK、图本身就是入耳式——球位从未坏过；坏的只有详情卡。
+            - 详情卡的图来自 AAM 本地缓存的机型资源包：开卡时不打日志、
+              也没有下载，Log 潜行和下载拦截都够不着它。
+            - 本版在 AAM 进程里盯住读文件入口（BitmapFactory.decodeFile /
+              decodeStream、FileInputStream 构造、AssetManager.open）：
+              命中产品图路径就把完整路径和调用栈记进 LSPosed 日志，
+              栈里第一个宿主帧就是资源包的加载类。
+            - 另加 Activity.onResume 一行时间标记，方便在日志里对齐
+              「卡打开后读了哪些文件」的时间窗。
+            - v2.10.3 的 capsule 改写等全部既有逻辑原样保留。
 
-            与 2.10.1 / 2.10.2 同一签名，可直接覆盖安装。
+            与 2.10.1–2.10.3 同一签名，可直接覆盖安装。装好后重启面板
+            进程（强停「音频产品管家」或重连耳机），打开一次详情卡，
+            再导出 LSPosed 日志即可。
           files: dist/*.apk

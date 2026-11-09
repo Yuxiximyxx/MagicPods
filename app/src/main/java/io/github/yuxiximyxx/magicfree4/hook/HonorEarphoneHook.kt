@@ -53,6 +53,13 @@ object HonorEarphoneHook : HookContext() {
     private val LOG_SNOOP_GUARD = ThreadLocal.withInitial { false }
     private val LOG_SNOOP_HITS = java.util.concurrent.atomic.AtomicInteger(0)
 
+    // 观察点 14d（v2.10.4 侦察）：文件潜行——线程级重入守卫、全栈总量计数
+    // （封顶 40 条）、按路径分别计数（同路径只打前 3 次全栈，之后只计数）。
+    private val FILE_SNOOP_GUARD = ThreadLocal.withInitial { false }
+    private val FILE_SNOOP_STACK_TOTAL = java.util.concurrent.atomic.AtomicInteger(0)
+    private val FILE_SNOOP_PATH_COUNTS =
+        java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger>()
+
     override fun onHook() {
         Log.i(TAG, "onHook start pkg=$packageName")
 
@@ -428,6 +435,26 @@ object HonorEarphoneHook : HookContext() {
             Log.e(TAG, "install y0.f 拦截 failed: ${it.javaClass.simpleName}: ${it.message}")
         }
 
+        // ── 观察点 14d（v2.10.4 侦察）：文件潜行 + onResume 时间窗标记 ──
+        // v2.10.3 真机定案：capsule 那条路只喂球位（Free4 的 capsule 键是
+        // VRDK、本就入耳），详情卡的图来自本地缓存的机型资源包——开卡时
+        // 不打日志、无下载，Log 潜行与下载拦截都够不着。本版改盯最底层
+        // 的「读文件」：BitmapFactory.decodeFile / decodeStream、
+        // FileInputStream 构造、AssetManager.open，命中图片资源路径就
+        // 打路径+调用栈，栈里第一个宿主帧就是资源包的加载类。另加
+        // Activity.onResume 一行标记，对齐「卡打开后读了哪些文件」。
+        // 纯观察，不做任何功能改写（见 installFileSnoop）。
+        runCatching {
+            installFileSnoop()
+        }.onFailure {
+            Log.e(TAG, "install 文件潜行 failed: ${it.javaClass.simpleName}: ${it.message}")
+        }
+        runCatching {
+            installActivityResumeMarker()
+        }.onFailure {
+            Log.w(TAG, "install Activity.onResume 标记 failed: ${it.javaClass.simpleName}: ${it.message}")
+        }
+
         Log.i(TAG, "onHook done pkg=$packageName")
     }
 
@@ -702,7 +729,204 @@ object HonorEarphoneHook : HookContext() {
         return chain.proceed()
     }
 
+    /**
+     * 观察点 14d：文件潜行装载——hook 四组入口（共 8 个）：
+     * BitmapFactory.decodeFile(String)/(String,Options)、
+     * BitmapFactory.decodeStream(InputStream)/(InputStream,Rect,Options)、
+     * FileInputStream 的 (File)/(String) 构造、AssetManager.open(String)/(String,int)。
+     * 单组装不上只记 Log.w，一个都没装上才抛错让外层记 failed。
+     * 纯观察：命中与否都原样 proceed，返回值一律不改。
+     */
+    private fun installFileSnoop() {
+        var hooked = 0
+        val total = 8
+
+        // BitmapFactory.decodeFile 两个重载（静态方法）：arg0 = 文件路径
+        runCatching {
+            val bf = findClass("android.graphics.BitmapFactory")
+            val options = findClass("android.graphics.BitmapFactory\$Options")
+            for (m in listOf(
+                bf.getDeclaredMethod("decodeFile", String::class.java),
+                bf.getDeclaredMethod("decodeFile", String::class.java, options)
+            )) {
+                m.isAccessible = true
+                module.hook(m).intercept { chain ->
+                    (chain.args.getOrNull(0) as? String)?.let {
+                        onFileSnoopHit("BitmapFactory.decodeFile", it)
+                    }
+                    chain.proceed()
+                }
+                hooked++
+            }
+        }.onFailure {
+            Log.w(TAG, "文件潜行 hook BitmapFactory.decodeFile 失败: ${it.javaClass.simpleName}: ${it.message}")
+        }
+
+        // BitmapFactory.decodeStream 两个重载：流本身没有路径，仅当流是
+        // FileInputStream 时反射其 path 字段尽力取来源（见 fileStreamPathOrNull）。
+        runCatching {
+            val bf = findClass("android.graphics.BitmapFactory")
+            val rect = findClass("android.graphics.Rect")
+            val options = findClass("android.graphics.BitmapFactory\$Options")
+            for (m in listOf(
+                bf.getDeclaredMethod("decodeStream", java.io.InputStream::class.java),
+                bf.getDeclaredMethod("decodeStream", java.io.InputStream::class.java, rect, options)
+            )) {
+                m.isAccessible = true
+                module.hook(m).intercept { chain ->
+                    fileStreamPathOrNull(chain.args.getOrNull(0))?.let {
+                        onFileSnoopHit("BitmapFactory.decodeStream", it)
+                    }
+                    chain.proceed()
+                }
+                hooked++
+            }
+        }.onFailure {
+            Log.w(TAG, "文件潜行 hook BitmapFactory.decodeStream 失败: ${it.javaClass.simpleName}: ${it.message}")
+        }
+
+        // FileInputStream (File)/(String) 构造：arg0 即路径
+        runCatching {
+            val fis = findClass("java.io.FileInputStream")
+            for (ctor in listOf(
+                fis.getDeclaredConstructor(java.io.File::class.java),
+                fis.getDeclaredConstructor(String::class.java)
+            )) {
+                ctor.isAccessible = true
+                module.hook(ctor).intercept { chain ->
+                    val p = when (val a0 = chain.args.getOrNull(0)) {
+                        is java.io.File -> a0.path
+                        is String -> a0
+                        else -> null
+                    }
+                    if (p != null) onFileSnoopHit("FileInputStream", p)
+                    chain.proceed()
+                }
+                hooked++
+            }
+        }.onFailure {
+            Log.w(TAG, "文件潜行 hook FileInputStream 构造失败: ${it.javaClass.simpleName}: ${it.message}")
+        }
+
+        // AssetManager.open(String)/(String,int)：arg0 = assets 相对路径
+        // （如 images/Third/...），资源包若走 assets 兜底会在这里露头。
+        runCatching {
+            val am = findClass("android.content.res.AssetManager")
+            for (m in listOf(
+                am.getDeclaredMethod("open", String::class.java),
+                am.getDeclaredMethod("open", String::class.java, Int::class.java)
+            )) {
+                m.isAccessible = true
+                module.hook(m).intercept { chain ->
+                    (chain.args.getOrNull(0) as? String)?.let {
+                        onFileSnoopHit("AssetManager.open", it)
+                    }
+                    chain.proceed()
+                }
+                hooked++
+            }
+        }.onFailure {
+            Log.w(TAG, "文件潜行 hook AssetManager.open 失败: ${it.javaClass.simpleName}: ${it.message}")
+        }
+
+        Log.i(TAG, "installed: 文件潜行（$hooked/$total 个入口）[BitmapFactory/FileInputStream/AssetManager]")
+        if (hooked == 0) throw IllegalStateException("文件潜行一个入口都没装上")
+    }
+
+    /** 文件潜行命中判定（廉价 contains 先行，命不中绝不取栈）：路径含产品键
+     *  "Third" / "FCPG" / "VRDK"，或含 "images/" / "capsule"；或图片扩展名
+     *  （.webp/.png/.jpg）且路径落在应用数据区（含 "audioaccessorymanager"
+     *  / "cache" / "files"）。AssetManager.open 的 assets 相对路径同理。 */
+    private fun isInterestingImagePath(path: String): Boolean {
+        if (path.contains("Third") || path.contains("FCPG") || path.contains("VRDK") ||
+            path.contains("images/") || path.contains("capsule")
+        ) return true
+        val lower = path.lowercase()
+        return (lower.endsWith(".webp") || lower.endsWith(".png") || lower.endsWith(".jpg")) &&
+            (path.contains("audioaccessorymanager") || path.contains("cache") || path.contains("files"))
+    }
+
+    /**
+     * 文件潜行命中处理：同路径只打前 3 次全栈、之后只计数汇总；全栈总量
+     * 封顶 40 条防刷屏。打栈时滤掉被 hook 的框架类（java.io /
+     * android.graphics / android.content.res）、本模块与 hook 框架帧，
+     * 最多 25 帧——栈里第一个宿主帧就是打开这张图的加载类。
+     * 模块自己的日志输出全程持 FILE_SNOOP_GUARD，避免输出动作递归
+     * 触发潜行；此函数只记日志、不改任何宿主行为。
+     */
+    private fun onFileSnoopHit(entry: String, path: String) {
+        if (FILE_SNOOP_GUARD.get() == true) return
+        if (!isInterestingImagePath(path)) return
+        val count = FILE_SNOOP_PATH_COUNTS
+            .computeIfAbsent(path) { java.util.concurrent.atomic.AtomicInteger(0) }
+            .incrementAndGet()
+        val full = count <= 3 && FILE_SNOOP_STACK_TOTAL.get() < 40
+        if (!full && count != 4 && count % 50 != 0) return
+        FILE_SNOOP_GUARD.set(true)
+        try {
+            if (full) {
+                val n = FILE_SNOOP_STACK_TOTAL.incrementAndGet()
+                Log.i(TAG, "文件潜行命中 #$n $entry path=$path（该路径第 $count 次）")
+                val frames = Throwable().stackTrace.filter { st ->
+                    val cn = st.className
+                    !cn.startsWith("java.io.") &&
+                        !cn.startsWith("android.graphics.") &&
+                        !cn.startsWith("android.content.res.") &&
+                        !cn.startsWith("io.github.yuxiximyxx.magicfree4") &&
+                        !cn.startsWith("io.github.libxposed") &&
+                        !cn.startsWith("org.lsposed") &&
+                        cn != "java.lang.Thread"
+                }.take(25)
+                for ((idx, st) in frames.withIndex()) {
+                    Log.i(TAG, "文件潜行栈 #$n [$idx] ${st.className}.${st.methodName}")
+                }
+            } else {
+                Log.i(TAG, "文件潜行计数 $entry path=$path 已达 $count 次（同路径只打前 3 次全栈，全栈封顶 40 条）")
+            }
+        } finally {
+            FILE_SNOOP_GUARD.set(false)
+        }
+    }
+
+    /** 尽力从 InputStream 取来源路径：仅处理 FileInputStream（反射其
+     *  `path` 字段，libcore 实现里有此字段）；其他流或取不到一律返回
+     *  null，绝不抛错——decodeStream 一路取不到来源就直接放过。 */
+    private fun fileStreamPathOrNull(stream: Any?): String? {
+        if (stream == null || stream.javaClass.name != "java.io.FileInputStream") return null
+        return runCatching {
+            var cls: Class<*>? = stream.javaClass
+            var path: String? = null
+            while (cls != null && path == null) {
+                path = runCatching {
+                    cls.getDeclaredField("path").apply { isAccessible = true }.get(stream) as? String
+                }.getOrNull()
+                cls = cls.superclass
+            }
+            path
+        }.getOrNull()
+    }
+
+    /**
+     * 观察点 14d 附带：Activity.onResume 时间窗标记——任何 Activity
+     * 恢复时只记一行「类名 @ 毫秒时间戳」，让文件潜行的命中能对齐到
+     * 「详情卡打开之后」的时间窗。先记标记再 proceed：onResume 内部
+     * 触发的读文件都会落在这个标记之后。纯观察，不改行为。
+     */
+    private fun installActivityResumeMarker() {
+        val m = findClass("android.app.Activity").getDeclaredMethod("onResume")
+        m.isAccessible = true
+        module.hook(m).intercept { chain ->
+            runCatching {
+                val name = chain.thisObject?.javaClass?.name ?: "?"
+                Log.i(TAG, "Activity.onResume 标记: $name @ ${System.currentTimeMillis()}")
+            }
+            chain.proceed()
+        }
+        Log.i(TAG, "installed: Activity.onResume 时间窗标记 [对齐文件潜行时间窗]")
+    }
+
     /** 枚举宿主 ClassLoader 里全部 dex 的类名（反射读 pathList → dexElements → dexFile）。 */
+
     private fun enumerateDexClassNames(): List<String> {
         val names = LinkedHashSet<String>()
         val pathList = runCatching {
