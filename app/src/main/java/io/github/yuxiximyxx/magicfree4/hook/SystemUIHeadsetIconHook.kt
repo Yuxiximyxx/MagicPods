@@ -67,6 +67,10 @@ object SystemUIHeadsetIconHook : HookContext() {
     private val REWRITE_CHAIN_LOGGED = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
     private val REWRITE_CHAIN_TOTAL = java.util.concurrent.atomic.AtomicInteger(0)
 
+    // v2.10.11 定位信号日志去重：文本+两信号签名，只打前 20 条不同的
+    private val REWRITE_SIGNAL_LOGGED = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+    private val REWRITE_SIGNAL_TOTAL = java.util.concurrent.atomic.AtomicInteger(0)
+
     /** 沿 view 的 parent 链向上收集祖先类名（≤12 层，含 view 自身一层）。 */
     private fun ancestorChain(view: android.view.View?): List<String> {
         val out = ArrayList<String>(12)
@@ -78,6 +82,49 @@ object SystemUIHeadsetIconHook : HookContext() {
         return out
     }
 
+    /** 视图 id 名：无视图/无 id 记 "no-id"，资源名解析失败记 hex。 */
+    private fun viewIdName(view: android.view.View?): String {
+        val v = view ?: return "no-id"
+        val id = v.id
+        if (id == android.view.View.NO_ID) return "no-id"
+        return runCatching { v.resources.getResourceEntryName(id) }.getOrNull()
+            ?: "0x${Integer.toHexString(id)}"
+    }
+
+    /** 沿 ContextWrapper 链 unwrap 找第一个 Activity 的类名；找不到记 context 本身的类名。 */
+    private fun activityClassName(ctx: android.content.Context?): String {
+        if (ctx == null) return "no-ctx"
+        var cur: android.content.Context? = ctx
+        var hops = 0
+        while (cur != null && hops++ < 20) {
+            if (cur is android.app.Activity) return cur.javaClass.name
+            cur = (cur as? android.content.ContextWrapper)?.baseContext ?: break
+        }
+        return ctx.javaClass.name
+    }
+
+    /**
+     * v2.10.11 侦察：机型名分支决定改写前，先把两个定位信号打一行——
+     * 视图 id 名，与沿 context unwrap 到的 Activity 类名（并列 rootView 类名）。
+     * v2.10.9 的祖先链全是通用布局类、区分不了播控与通知/胶囊，
+     * 靠这两个信号找门控特征。纯观察：放行行为（改不改写）不变。
+     */
+    private fun logRewriteSignal(text: String, view: android.view.View?) {
+        runCatching {
+            val idName = viewIdName(view)
+            val actName = activityClassName(view?.context)
+            val rootName = view?.let {
+                runCatching { it.rootView?.javaClass?.name }.getOrNull()
+            } ?: "no-root"
+            val sig = "$text|$idName|$actName|$rootName"
+            if (REWRITE_SIGNAL_LOGGED.putIfAbsent(sig, true) == null &&
+                REWRITE_SIGNAL_TOTAL.incrementAndGet() <= 20
+            ) {
+                Log.i(TAG, "改写信号: '$text' id=$idName act=$actName root=$rootName")
+            }
+        }
+    }
+
     /**
      * 占位文案换成当前机型名；已经是任一支持机型的名字时换成电量行。
      * ★ 例外（v2.10.9）：媒体输出选择器（播控）的设备行要显示设备名——
@@ -86,6 +133,7 @@ object SystemUIHeadsetIconHook : HookContext() {
     private fun rewriteAudioLabel(text: String, view: android.view.View? = null): String? = when {
         text == "当前音频输入输出设备" -> currentDisplayName()
         PodProfiles.ALL.any { it.displayName == text } -> {
+            logRewriteSignal(text, view)
             val chain = ancestorChain(view)
             if (chain.isNotEmpty()) {
                 val sig = "$text|${chain.joinToString(">")}"
