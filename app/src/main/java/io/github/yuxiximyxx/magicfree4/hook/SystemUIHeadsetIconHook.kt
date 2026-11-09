@@ -134,6 +134,10 @@ object SystemUIHeadsetIconHook : HookContext() {
      * 被 setText 终防线改写的表象，真正的播控面板从未被模块碰过。故 setText 路径
      * 对机型名一律不改（返回 null），切歌通知标题恢复设备名；「占位文案→机型名」
      * 替换两条路径都保留。
+     * ★ v2.10.13：v2.10.12 把 setText 路径全关后，音频输出通知变成「标题=设备名、
+     * 内容=设备名」——内容行的电量原本就是 setText 路径改出来的（RemoteViews walk
+     * 改的那棵树不是实际上屏的那棵）。故 setText 路径按视图 id 分流：id 名为
+     * "title" 的是标题视图，不改（保设备名）；其余视图恢复电量行改写。
      */
     private fun rewriteAudioLabel(
         text: String,
@@ -152,16 +156,24 @@ object SystemUIHeadsetIconHook : HookContext() {
                     Log.i(TAG, "改写祖先链: '$text' <- ${chain.joinToString(" <- ")}")
                 }
             }
-            if (!inRemoteViewsTree) {
-                null
-            } else if (chain.any {
-                    it.contains("MediaOutput", ignoreCase = true) ||
-                        it.contains("OutputSwitcher", ignoreCase = true)
+            if (inRemoteViewsTree) {
+                if (chain.any {
+                        it.contains("MediaOutput", ignoreCase = true) ||
+                            it.contains("OutputSwitcher", ignoreCase = true)
+                    }
+                ) {
+                    null
+                } else {
+                    readBatteryLine()
                 }
-            ) {
-                null
             } else {
-                readBatteryLine()
+                // v2.10.13：setText 路径——标题视图（id 名 "title"）保设备名，
+                // 其余视图（通知内容行等）恢复电量行改写。
+                if (viewIdName(view) == "title") {
+                    null
+                } else {
+                    readBatteryLine()
+                }
             }
         }
         else -> null

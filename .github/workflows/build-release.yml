@@ -50,13 +50,13 @@ jobs:
           mkdir -p dist
           SRC=$(ls app/build/outputs/apk/release/*.apk | head -1)
           echo "release apk: $SRC"
-          cp "$SRC" dist/MagicPods-2.10.12-release.apk
+          cp "$SRC" dist/MagicPods-2.10.13-release.apk
           ls -lh dist
 
       - name: Verify signature
         run: |
           SDK=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          "$SDK/apksigner" verify --print-certs dist/MagicPods-2.10.12-release.apk
+          "$SDK/apksigner" verify --print-certs dist/MagicPods-2.10.13-release.apk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -68,30 +68,28 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.10.12
-          name: MagicPods 2.10.12
+          tag_name: v2.10.13
+          name: MagicPods 2.10.13
           body: |
-            ## MagicPods 2.10.12（机型名改写只限通知树）
+            ## MagicPods 2.10.13（通知标题保名、内容行恢复电量）
 
-            播控案结案（v2.10.11「改写信号」真机实锤）：切歌 /
-            打开播控时成对出现的改写事件，是下拉通知栏里切歌
-            通知（media style 通知）的标题被 TextView.setText
-            终防线改写的表象——真正的播控面板根本没有被模块
-            碰过，设备名一直是好的。
+            v2.10.12 把 setText 终防线的机型名→电量行改写
+            整体关掉后，音频输出通知变成「标题=设备名、内容
+            =设备名」——内容行的电量原本就是 setText 路径改
+            出来的（RemoteViews walk 改的那棵树不是实际上屏
+            的那棵）。本版按视图 id 分流，两边都要：
 
             本版改动（只动 SystemUIHeadsetIconHook）：
 
-            - rewriteAudioLabel 新增 inRemoteViewsTree 参数：
-              RemoteViews.apply/reapply 的通知树遍历传 true，
-              TextView.setText 终防线传 false。
-            - 机型名→电量行 改写只在通知树内发生；setText
-              路径对机型名直接不改——切歌通知标题恢复为设备
-              名（原生形态），胶囊/通知/服务卡所需的电量行
-              改写（通知树内）保留。
-            - 「当前音频输入输出设备」→ 机型名 的替换两条
-              路径都保留；祖先链日志、MediaOutput 门控与
-              「改写信号」日志原样保留。
+            - rewriteAudioLabel 机型名分支：RemoteViews 树
+              路径维持现状（返回电量行）。
+            - setText 路径：视图 id 名为 "title" 的是标题，
+              不改（保住设备名）；其余视图恢复电量行改写
+              （通知内容行回到左耳/右耳电量）。
+            - 「改写信号」日志仍在分支最前面打（改与不改都
+              记）；「当前音频输入输出设备」→机型名两路保留；
+              祖先链门控/日志原样保留。
 
-            v2.10.8–v2.10.11 的全部改动原样保留。与
-            2.10.1–2.10.11 同一签名，可直接覆盖安装。
+            v2.10.8–v2.10.12 的全部改动原样保留。与
+            2.10.1–2.10.12 同一签名，可直接覆盖安装。
           files: dist/*.apk
