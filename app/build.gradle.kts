@@ -10,7 +10,12 @@ plugins {
 
 // 发布签名密钥库。*.jks 在 .gitignore 里，克隆仓库后该文件默认不存在；
 // 构建脚本据此回退到 debug 签名，保证 assembleRelease 仍能产出可安装的 APK。
-val releaseKeystore = file("signing/magicorig.jks")
+// CI（GitHub Actions）通过环境变量 MAGICPODS_KEYSTORE_FILE 指向 secrets 解码出的
+// 密钥库，并用 MAGICPODS_STORE_PASSWORD / MAGICPODS_KEY_ALIAS / MAGICPODS_KEY_PASSWORD
+// 注入凭据；未设置环境变量时保持原 magicorig 本地行为不变。
+val releaseKeystore = System.getenv("MAGICPODS_KEYSTORE_FILE")
+    ?.takeIf { it.isNotBlank() }?.let { file(it) }
+    ?: file("signing/magicorig.jks")
 
 android {
     namespace = "io.github.yuxiximyxx.magicfree4"
@@ -20,16 +25,16 @@ android {
         applicationId = "io.github.yuxiximyxx.magicfree4"
         minSdk = 34   // Android 14 (MagicOS 8 / HarmonyOS NEXT)
         targetSdk = 35
-        versionCode = 200064
-        versionName = "2.10.0"
+        versionCode = 200065
+        versionName = "2.10.1"
     }
 
     signingConfigs {
         create("release") {
             storeFile = releaseKeystore
-            storePassword = "magicorig123"
-            keyAlias = "magicorig"
-            keyPassword = "magicorig123"
+            storePassword = System.getenv("MAGICPODS_STORE_PASSWORD") ?: "magicorig123"
+            keyAlias = System.getenv("MAGICPODS_KEY_ALIAS") ?: "magicorig"
+            keyPassword = System.getenv("MAGICPODS_KEY_PASSWORD") ?: "magicorig123"
         }
     }
 

@@ -37,6 +37,10 @@ object HonorEarphoneHook : HookContext() {
     private fun FPG_SET() { FCPG_REENTER.set(true) }
     private fun FPG_CLEAR() { FCPG_REENTER.set(false) }
 
+    // 观察点 14：ImageLoadUtils 运行时发现的一次性守卫与重定向计数
+    private val IMAGE_DISCOVERY_STARTED = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val IMAGE_REDIRECT_COUNT = java.util.concurrent.atomic.AtomicInteger(0)
+
     override fun onHook() {
         Log.i(TAG, "onHook start pkg=$packageName")
 
@@ -368,7 +372,121 @@ object HonorEarphoneHook : HookContext() {
             }
         }
 
+        // ── 观察点 14：ImageLoadUtils —— 面板大图标按产品名加载资源 ──
+        // 日志实证 "ImageLoadUtils: --Third res state === REQUEST_SUCCESS"：
+        // 大图标由 AAM 按产品名 "Third" 加载资源；系统更新（11.0.0.117）后
+        // "Third" 的资源变成了通用头戴图，Free4（入耳式）被画成了头戴式。
+        // 类名未知（混淆发行），这里只启动后台一次性发现（见 installImageLoadRedirect），
+        // 发现后给带 String 参数的方法装重定向：实参恰为 "Third" → "FCPG"
+        // （AirPods 4 降噪版，入耳式；本模块的 uiconfig 注入已同步它的资源）。
+        // 身份（modelId/productId）与 uiconfig 都不是图标来源，不动它们。
+        runCatching {
+            installImageLoadRedirect()
+            Log.i(TAG, "installed: ImageLoadUtils 后台发现 [面板图标 Third→FCPG]")
+        }.onFailure {
+            Log.e(TAG, "install ImageLoadUtils failed: ${it.javaClass.simpleName}: ${it.message}")
+        }
+
         Log.i(TAG, "onHook done pkg=$packageName")
+    }
+
+    /**
+     * 观察点 14 的一次性启动：发现 ImageLoadUtils 需要枚举宿主全部 dex 类名
+     * （数万个），放后台守护线程做、不阻塞 AAM 启动；进程内只跑一次。
+     */
+    private fun installImageLoadRedirect() {
+        if (!IMAGE_DISCOVERY_STARTED.compareAndSet(false, true)) return
+        Thread {
+            runCatching { discoverAndHookImageLoadUtils() }
+                .onFailure {
+                    Log.e(TAG, "ImageLoadUtils 发现/装载失败: ${it.javaClass.simpleName}: ${it.message}")
+                }
+        }.apply {
+            name = "MagicPods-ImageLoadDiscover"
+            isDaemon = true
+        }.start()
+    }
+
+    /**
+     * 经 dex 枚举找 simple name 恰为 ImageLoadUtils 的类（候选优先 com.hihonor.*），
+     * 先把全部 declared methods 打进日志作方法面证据，再给带 String 参数的方法
+     * 装 Third→FCPG 重定向 hook：只替换精确等于 "Third" 的实参，其余一律不碰。
+     * 重定向日志前 20 次记全、之后每 50 次汇总一行，避免刷屏。
+     * 任何一步失败只记 Log.e，不影响现有功能。
+     */
+    private fun discoverAndHookImageLoadUtils() {
+        val candidates = enumerateDexClassNames()
+            .filter { it.substringAfterLast('.') == "ImageLoadUtils" }
+            .distinct()
+        if (candidates.isEmpty()) {
+            Log.e(TAG, "ImageLoadUtils 未发现：dex 枚举里没有 simple name == ImageLoadUtils 的类")
+            return
+        }
+        Log.i(TAG, "ImageLoadUtils 候选（${candidates.size}）: ${candidates.joinToString()}")
+        val chosen = candidates.firstOrNull { it.startsWith("com.hihonor.") } ?: candidates.first()
+        val clazz = findClass(chosen)
+        Log.i(TAG, "ImageLoadUtils 已定位: ${clazz.name}")
+
+        val methods = clazz.declaredMethods.toList()
+        for (m in methods) {
+            val params = m.parameterTypes.joinToString(", ") { it.simpleName }
+            val mods = if (java.lang.reflect.Modifier.isStatic(m.modifiers)) " static" else ""
+            Log.i(TAG, "ImageLoadUtils 方法面:$mods ${m.name}($params): ${m.returnType.simpleName}")
+        }
+
+        var hooked = 0
+        for (m in methods) {
+            if (m.parameterTypes.none { it == String::class.java }) continue
+            runCatching {
+                m.isAccessible = true
+                module.hook(m).intercept { chain ->
+                    val newArgs = chain.args.toTypedArray()
+                    var changed = false
+                    for (i in newArgs.indices) {
+                        if (newArgs[i] == "Third") {
+                            newArgs[i] = "FCPG"
+                            changed = true
+                        }
+                    }
+                    if (!changed) return@intercept chain.proceed()
+                    val n = IMAGE_REDIRECT_COUNT.incrementAndGet()
+                    when {
+                        n <= 20 -> Log.i(TAG, "ImageLoadUtils.${m.name}: Third→FCPG 重定向 #$n")
+                        n % 50 == 0 -> Log.i(TAG, "ImageLoadUtils: Third→FCPG 重定向累计 $n 次")
+                    }
+                    chain.proceed(newArgs)
+                }
+                hooked++
+            }.onFailure {
+                Log.w(TAG, "hook ImageLoadUtils.${m.name} 失败: ${it.javaClass.simpleName}: ${it.message}")
+            }
+        }
+        Log.i(TAG, "ImageLoadUtils 重定向 hook 装载完成: $hooked/${methods.size} 个方法")
+    }
+
+    /** 枚举宿主 ClassLoader 里全部 dex 的类名（反射读 pathList → dexElements → dexFile）。 */
+    private fun enumerateDexClassNames(): List<String> {
+        val names = LinkedHashSet<String>()
+        val pathList = runCatching {
+            val f = dalvik.system.BaseDexClassLoader::class.java
+                .getDeclaredField("pathList").apply { isAccessible = true }
+            f.get(appClassLoader)
+        }.getOrNull() ?: return emptyList()
+        val elements = runCatching {
+            val f = pathList.javaClass.getDeclaredField("dexElements").apply { isAccessible = true }
+            @Suppress("UNCHECKED_CAST")
+            f.get(pathList) as Array<Any>
+        }.getOrNull() ?: return emptyList()
+        for (element in elements) {
+            runCatching {
+                val f = element.javaClass.getDeclaredField("dexFile").apply { isAccessible = true }
+                val dexFile = f.get(element) as? dalvik.system.DexFile ?: return@runCatching
+                val entries = dexFile.entries()
+                while (entries.hasMoreElements()) names.add(entries.nextElement())
+            }
+        }
+        Log.i(TAG, "dex 类名枚举完成: ${names.size} 个（elements=${elements.size}）")
+        return names.toList()
     }
 
     private fun i2xClass(): Class<*> = findClass("i2.x")
