@@ -50,13 +50,13 @@ jobs:
           mkdir -p dist
           SRC=$(ls app/build/outputs/apk/release/*.apk | head -1)
           echo "release apk: $SRC"
-          cp "$SRC" dist/MagicPods-2.10.15-release.apk
+          cp "$SRC" dist/MagicPods-2.10.16-release.apk
           ls -lh dist
 
       - name: Verify signature
         run: |
           SDK=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          "$SDK/apksigner" verify --print-certs dist/MagicPods-2.10.15-release.apk
+          "$SDK/apksigner" verify --print-certs dist/MagicPods-2.10.16-release.apk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -68,35 +68,33 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.10.15
-          name: MagicPods 2.10.15
+          tag_name: v2.10.16
+          name: MagicPods 2.10.16
           body: |
-            ## MagicPods 2.10.15（音频通知标题恢复耳机名）
+            ## MagicPods 2.10.16（灵动胶囊第二行恢复设备名）
 
-            真机实证（2026-11-10 18:03 截图）：Free4 连着
-            在用时，音频设备通知标题仍是占位文案「当前音
-            频输入输出设备」原样、正文已是「左耳 100%
-            右耳 100%」。根因：v2.10.14 给占位分支加的
-            connectedAddresses 连接门在本进程实际维护不
-            起来、恒空（MagicXM4 同款 hook 已实证），把
-            正常连接态也一并拦死了；而 setText 路拿不到
-            改名结果，标题位就留了占位文案。同时 RemoteViews
-            遍历那一路会把标题位也改成电量行，与 setText
-            路的标题保名分流不一致、两路赛跑。
+            真机实证（2026-11-10 18:18 截图）：v2.10.15
+            的音频通知已验正（标题=OPPO Enco Free4、
+            正文=左耳/右耳电量行），但顶部灵动胶囊第二行
+            被换成了「左耳 90% 右耳 90%」——胶囊的设备名
+            TextView 也走 setText 终防线、id 非 title，
+            被机型名分支一并改成了电量行。胶囊第二行应
+            显示设备名（电量已有右侧电量环），与原生
+            FreeBuds、XM4 的胶囊一致。
 
-            本版改动（只动 SystemUIHeadsetIconHook）：
+            本版改动（只动 SystemUIHeadsetIconHook 的
+            rewriteAudioLabel 机型名分支）：
 
-            - 占位分支删掉连接门，无条件返回当前身份的
-              显示名。占位文案只出现在音频设备通知上且
-              精确匹配、显示名由 PodIdentity 身份驱动，
-              断开不盖名由「占位文案只在有当前音频设备
-              时才出现」天然保证。
-            - RemoteViews 路径的机型名分支补上与 setText
-              路同款的 id 分流：视图 id 名为 title 时保
-              设备名，电量行只落内容行；两路结果对齐。
+            - 新增胶囊守卫（RemoteViews / setText 两路
+              共用）：视图 id 为 hncard_view_message_text_2
+              或祖先链含 HnCardLayout / HnDynamicCard 时
+              返回 null 保设备名，不换电量行。信号来自
+              四份日志里恒定的「改写信号」：胶囊名位 id
+              与祖先链稳定，与通知正文（id=audio_device_name）
+              恒定可分。
+            - 通知正文的电量行改写、标题保名、占位分支
+              等其余逻辑逐行不动，v2.10.15 验正的通知
+              形态不受影响。
 
-            目标形态与其它耳机一致：标题=OPPO Enco
-            Free4、正文=左耳/右耳电量行。v2.10.8–v2.10.14
-            的其余改动原样保留。与 2.10.1–2.10.14 同一
-            签名，可直接覆盖安装。
+            与 2.10.1–2.10.15 同一签名，可直接覆盖安装。
           files: dist/*.apk

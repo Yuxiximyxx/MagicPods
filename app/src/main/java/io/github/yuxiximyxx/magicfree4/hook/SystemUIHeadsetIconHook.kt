@@ -154,6 +154,17 @@ object SystemUIHeadsetIconHook : HookContext() {
      * 「占位文案本身只在有当前音频设备时才出现」天然保证。同版另给 RemoteViews
      * 路径的机型名分支补上与 setText 路径同款的 id 分流（title 位保设备名），两路
      * 结果对齐，杜绝赛跑。
+     * ★ v2.10.16：灵动胶囊第二行保设备名。真机实证（2026-11-10 18:18 截图）：
+     * v2.10.15 的通知已验正（标题=机型名、正文=电量行），但顶部灵动胶囊（第一行
+     * 「已连接」、第二行本应是设备名、右侧电量环）第二行被机型名分支换成了电量
+     * 行——胶囊的设备名 TextView 也走 setText 终防线、id 非 title 故被扫中。胶囊
+     * 第二行的目标形态=设备名（电量已有右侧环显示，行内再放电量行纯属重复），
+     * 与原生 FreeBuds、XM4 胶囊一致。守卫信号来自今天四份 LSPosed 日志里恒定的
+     * 「改写信号」：胶囊卡设备名位 id 恒为 hncard_view_message_text_2、祖先链含
+     * HnCardLayout（root=HnCardLayout），与通知正文（id=audio_device_name）恒定
+     * 可分。故机型名分支在返回电量行之前先查胶囊守卫：id 为
+     * hncard_view_message_text_2 或祖先链含 HnCardLayout/HnDynamicCard → 返回
+     * null 保设备名，两条路径（RemoteViews / setText）共用同一道守卫。
      */
     private fun rewriteAudioLabel(
         text: String,
@@ -173,7 +184,17 @@ object SystemUIHeadsetIconHook : HookContext() {
                     Log.i(TAG, "改写祖先链: '$text' <- ${chain.joinToString(" <- ")}")
                 }
             }
-            if (inRemoteViewsTree) {
+            // v2.10.16 胶囊守卫（两路共用）：灵动胶囊第二行保设备名——
+            // id=hncard_view_message_text_2 或祖先链含 HnCardLayout /
+            // HnDynamicCard 即胶囊卡，电量已有右侧环显示，不换电量行。
+            val isCapsuleLabel = viewIdName(view) == "hncard_view_message_text_2" ||
+                chain.any {
+                    it.contains("HnCardLayout", ignoreCase = true) ||
+                        it.contains("HnDynamicCard", ignoreCase = true)
+                }
+            if (isCapsuleLabel) {
+                null
+            } else if (inRemoteViewsTree) {
                 if (chain.any {
                         it.contains("MediaOutput", ignoreCase = true) ||
                             it.contains("OutputSwitcher", ignoreCase = true)
