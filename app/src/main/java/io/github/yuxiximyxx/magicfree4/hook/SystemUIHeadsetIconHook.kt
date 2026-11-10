@@ -138,13 +138,20 @@ object SystemUIHeadsetIconHook : HookContext() {
      * 内容=设备名」——内容行的电量原本就是 setText 路径改出来的（RemoteViews walk
      * 改的那棵树不是实际上屏的那棵）。故 setText 路径按视图 id 分流：id 名为
      * "title" 的是标题视图，不改（保设备名）；其余视图恢复电量行改写。
+     * ★ v2.10.14：占位分支加连接门控。真机实证（2026-11-10 截图）：Free4 已断开、
+     * 音乐走本机扬声器时，音频通知标题仍被盖成「OPPO Enco Free4」（内容行是系统
+     * 自己的「本机」）——占位分支此前不查连接状态，currentDisplayName() 又恒兜底
+     * Free4 名，耳机不在也照样盖。故仅当本 hook 维护的 connectedAddresses 非空
+     * （确有我方耳机连着）时才换名，为空返回 null 留系统原文案。机型名分支不动：
+     * 它以「文本已是机型名」为前提，耳机不在时通知里不会出现该文本。
      */
     private fun rewriteAudioLabel(
         text: String,
         view: android.view.View? = null,
         inRemoteViewsTree: Boolean = false
     ): String? = when {
-        text == "当前音频输入输出设备" -> currentDisplayName()
+        text == "当前音频输入输出设备" ->
+            if (connectedAddresses.isNotEmpty()) currentDisplayName() else null
         PodProfiles.ALL.any { it.displayName == text } -> {
             logRewriteSignal(text, view)
             val chain = ancestorChain(view)

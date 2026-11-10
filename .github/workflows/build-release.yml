@@ -50,13 +50,13 @@ jobs:
           mkdir -p dist
           SRC=$(ls app/build/outputs/apk/release/*.apk | head -1)
           echo "release apk: $SRC"
-          cp "$SRC" dist/MagicPods-2.10.13-release.apk
+          cp "$SRC" dist/MagicPods-2.10.14-release.apk
           ls -lh dist
 
       - name: Verify signature
         run: |
           SDK=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          "$SDK/apksigner" verify --print-certs dist/MagicPods-2.10.13-release.apk
+          "$SDK/apksigner" verify --print-certs dist/MagicPods-2.10.14-release.apk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -68,28 +68,28 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.10.13
-          name: MagicPods 2.10.13
+          tag_name: v2.10.14
+          name: MagicPods 2.10.14
           body: |
-            ## MagicPods 2.10.13（通知标题保名、内容行恢复电量）
+            ## MagicPods 2.10.14（音频通知占位改名加连接门控）
 
-            v2.10.12 把 setText 终防线的机型名→电量行改写
-            整体关掉后，音频输出通知变成「标题=设备名、内容
-            =设备名」——内容行的电量原本就是 setText 路径改
-            出来的（RemoteViews walk 改的那棵树不是实际上屏
-            的那棵）。本版按视图 id 分流，两边都要：
+            真机实证：Free4 已断开、音乐走本机扬声器时，
+            音频通知标题仍被盖成「OPPO Enco Free4」（内容
+            行是系统自己的「本机」）。根因：rewriteAudioLabel
+            的占位分支（「当前音频输入输出设备」→机型名）
+            此前不查连接状态，currentDisplayName() 又恒兜底
+            Free4 名，耳机不在也照样盖。
 
             本版改动（只动 SystemUIHeadsetIconHook）：
 
-            - rewriteAudioLabel 机型名分支：RemoteViews 树
-              路径维持现状（返回电量行）。
-            - setText 路径：视图 id 名为 "title" 的是标题，
-              不改（保住设备名）；其余视图恢复电量行改写
-              （通知内容行回到左耳/右耳电量）。
-            - 「改写信号」日志仍在分支最前面打（改与不改都
-              记）；「当前音频输入输出设备」→机型名两路保留；
-              祖先链门控/日志原样保留。
+            - 占位分支加连接门控：仅当本 hook 维护的
+              connectedAddresses 非空（确有我方耳机连着）时
+              才换成机型名；为空返回 null，不改、留系统
+              原文案。RemoteViews walk 与 setText 两路共用
+              rewriteAudioLabel，一处加门全覆盖。
+            - 机型名→电量行分支（v2.10.13 的 id 分流）原样
+              不动。
 
-            v2.10.8–v2.10.12 的全部改动原样保留。与
-            2.10.1–2.10.12 同一签名，可直接覆盖安装。
+            v2.10.8–v2.10.13 的全部改动原样保留。与
+            2.10.1–2.10.13 同一签名，可直接覆盖安装。
           files: dist/*.apk
