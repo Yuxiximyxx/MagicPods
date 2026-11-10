@@ -144,6 +144,16 @@ object SystemUIHeadsetIconHook : HookContext() {
      * Free4 名，耳机不在也照样盖。故仅当本 hook 维护的 connectedAddresses 非空
      * （确有我方耳机连着）时才换名，为空返回 null 留系统原文案。机型名分支不动：
      * 它以「文本已是机型名」为前提，耳机不在时通知里不会出现该文本。
+     * ★ v2.10.15：撤销 v2.10.14 的连接门。真机实证（2026-11-10 18:03 截图）：Free4
+     * 连着在用时通知标题仍是占位文案原样、正文已是电量行——connectedAddresses 在
+     * SystemUI 进程内实际维护不起来、恒空（MagicXM4 同款 hook 已实证），这道门把
+     * 正常连接态也一并拦死了。改回无条件返回 currentDisplayName()，安全性不靠连接
+     * 门：占位文案只出现在音频设备通知上且文本精确匹配；显示名取当前身份
+     * PodIdentity.current().displayName（云端/本地身份驱动、未连接的异机型不会被
+     * 写上），不存在「无条件写死自家名」的问题；v2.10.14 的初衷（断开不盖名）由
+     * 「占位文案本身只在有当前音频设备时才出现」天然保证。同版另给 RemoteViews
+     * 路径的机型名分支补上与 setText 路径同款的 id 分流（title 位保设备名），两路
+     * 结果对齐，杜绝赛跑。
      */
     private fun rewriteAudioLabel(
         text: String,
@@ -151,7 +161,7 @@ object SystemUIHeadsetIconHook : HookContext() {
         inRemoteViewsTree: Boolean = false
     ): String? = when {
         text == "当前音频输入输出设备" ->
-            if (connectedAddresses.isNotEmpty()) currentDisplayName() else null
+            currentDisplayName()
         PodProfiles.ALL.any { it.displayName == text } -> {
             logRewriteSignal(text, view)
             val chain = ancestorChain(view)
@@ -169,6 +179,11 @@ object SystemUIHeadsetIconHook : HookContext() {
                             it.contains("OutputSwitcher", ignoreCase = true)
                     }
                 ) {
+                    null
+                } else if (viewIdName(view) == "title") {
+                    // v2.10.15：与 setText 路径同款的 id 分流——标题位保设备名，
+                    // 电量行只许落在内容行。占位分支先把标题位换成机型名，这道
+                    // 分流正好接住它，两条路径结果一致。
                     null
                 } else {
                     readBatteryLine()

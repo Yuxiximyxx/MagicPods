@@ -50,13 +50,13 @@ jobs:
           mkdir -p dist
           SRC=$(ls app/build/outputs/apk/release/*.apk | head -1)
           echo "release apk: $SRC"
-          cp "$SRC" dist/MagicPods-2.10.14-release.apk
+          cp "$SRC" dist/MagicPods-2.10.15-release.apk
           ls -lh dist
 
       - name: Verify signature
         run: |
           SDK=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          "$SDK/apksigner" verify --print-certs dist/MagicPods-2.10.14-release.apk
+          "$SDK/apksigner" verify --print-certs dist/MagicPods-2.10.15-release.apk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -68,28 +68,35 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.10.14
-          name: MagicPods 2.10.14
+          tag_name: v2.10.15
+          name: MagicPods 2.10.15
           body: |
-            ## MagicPods 2.10.14（音频通知占位改名加连接门控）
+            ## MagicPods 2.10.15（音频通知标题恢复耳机名）
 
-            真机实证：Free4 已断开、音乐走本机扬声器时，
-            音频通知标题仍被盖成「OPPO Enco Free4」（内容
-            行是系统自己的「本机」）。根因：rewriteAudioLabel
-            的占位分支（「当前音频输入输出设备」→机型名）
-            此前不查连接状态，currentDisplayName() 又恒兜底
-            Free4 名，耳机不在也照样盖。
+            真机实证（2026-11-10 18:03 截图）：Free4 连着
+            在用时，音频设备通知标题仍是占位文案「当前音
+            频输入输出设备」原样、正文已是「左耳 100%
+            右耳 100%」。根因：v2.10.14 给占位分支加的
+            connectedAddresses 连接门在本进程实际维护不
+            起来、恒空（MagicXM4 同款 hook 已实证），把
+            正常连接态也一并拦死了；而 setText 路拿不到
+            改名结果，标题位就留了占位文案。同时 RemoteViews
+            遍历那一路会把标题位也改成电量行，与 setText
+            路的标题保名分流不一致、两路赛跑。
 
             本版改动（只动 SystemUIHeadsetIconHook）：
 
-            - 占位分支加连接门控：仅当本 hook 维护的
-              connectedAddresses 非空（确有我方耳机连着）时
-              才换成机型名；为空返回 null，不改、留系统
-              原文案。RemoteViews walk 与 setText 两路共用
-              rewriteAudioLabel，一处加门全覆盖。
-            - 机型名→电量行分支（v2.10.13 的 id 分流）原样
-              不动。
+            - 占位分支删掉连接门，无条件返回当前身份的
+              显示名。占位文案只出现在音频设备通知上且
+              精确匹配、显示名由 PodIdentity 身份驱动，
+              断开不盖名由「占位文案只在有当前音频设备
+              时才出现」天然保证。
+            - RemoteViews 路径的机型名分支补上与 setText
+              路同款的 id 分流：视图 id 名为 title 时保
+              设备名，电量行只落内容行；两路结果对齐。
 
-            v2.10.8–v2.10.13 的全部改动原样保留。与
-            2.10.1–2.10.13 同一签名，可直接覆盖安装。
+            目标形态与其它耳机一致：标题=OPPO Enco
+            Free4、正文=左耳/右耳电量行。v2.10.8–v2.10.14
+            的其余改动原样保留。与 2.10.1–2.10.14 同一
+            签名，可直接覆盖安装。
           files: dist/*.apk
