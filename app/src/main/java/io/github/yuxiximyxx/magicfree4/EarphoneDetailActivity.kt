@@ -631,9 +631,9 @@ class EarphoneDetailActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
                     horizontalArrangement = Arrangement.SpaceEvenly,
                 ) {
-                    BatteryRing("左耳", bat[0])
-                    BatteryRing("右耳", bat[1])
-                    BatteryRing("充电仓", bat[2])
+                    BatteryRing("左耳", if (connected) bat[0] else -1)
+                    BatteryRing("右耳", if (connected) bat[1] else -1)
+                    BatteryRing("充电仓", if (connected) bat[2] else -1)
                 }
             }
 

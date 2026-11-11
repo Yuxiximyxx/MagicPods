@@ -50,13 +50,13 @@ jobs:
           mkdir -p dist
           SRC=$(ls app/build/outputs/apk/release/*.apk | head -1)
           echo "release apk: $SRC"
-          cp "$SRC" dist/MagicPods-2.11.0-release.apk
+          cp "$SRC" dist/MagicPods-2.11.1-release.apk
           ls -lh dist
 
       - name: Verify signature
         run: |
           SDK=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          "$SDK/apksigner" verify --print-certs dist/MagicPods-2.11.0-release.apk
+          "$SDK/apksigner" verify --print-certs dist/MagicPods-2.11.1-release.apk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -68,26 +68,20 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.11.0
-          name: MagicPods 2.11.0
+          tag_name: v2.11.1
+          name: MagicPods 2.11.1 — 未连接时详情页不显示电量
           body: |
-            ## MagicPods 2.11.0（详情页迁 MIUIX）
+            ## MagicPods 2.11.1（补丁，叠在 2.11.0 之上）
 
-            耳机详情页按统一风格口径迁到 MIUIX（Miuix-KMP
-            真组件）：主题层换 MiuixTheme、骨架换 Miuix
-            Scaffold + SmallTopAppBar、分组换 Miuix Card +
-            SmallTitle、导航行换 SuperArrow、开关行换
-            SuperSwitch、只读行换 BasicComponent、滑杆与
-            弹窗换 Miuix Slider / WindowDialog。电量环、降噪
-            分段等自绘部件保留原绘制、放进 Miuix 卡片容器。
+            修 2.11.0 真机验收发现的问题：耳机未连接时，
+            详情页概览仍显示上次的电量百分比。本版只在
+            显示层加连接门控——未连接时左耳/右耳/充电仓
+            三个电量环显示「--」、不画弧，连接后照常
+            显示实时电量。
 
-            工具链同步对齐 LumaGA 实证组合：Gradle 9.3.1 /
-            AGP 9.1.1 / Kotlin 2.4.10 / Compose BOM 2026.05.00 /
-            miuix 0.8.8（旧版被注释掉的 miuix 依赖卡点即
-            工具链过旧，本版一并解除）。
-
-            功能与数据流零变化：页面结构、条目、文案、跳转、
-            广播与协议调用、状态读取全部原样；所有 hook、
-            身份与协议层未动。与 2.10.x 同一签名，可直接
-            覆盖安装。
+            电量数据本身不动：Settings.Global 里持久化
+            的上次电量保留（设备中心卡、电量历史、低电
+            量提醒仍靠它）。其余（MIUIX 界面、hooks、
+            协议、工具链）与 2.11.0 逐行一致，同一签名，
+            可直接覆盖安装。
           files: dist/*.apk
