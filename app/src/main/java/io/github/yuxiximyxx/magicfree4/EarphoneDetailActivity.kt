@@ -19,8 +19,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -28,22 +27,28 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.Image
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.TextFieldDefaults
-import androidx.compose.material3.Slider
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import top.yukonga.miuix.kmp.basic.BasicComponent
+import top.yukonga.miuix.kmp.basic.ButtonDefaults
+import top.yukonga.miuix.kmp.basic.Card
+import top.yukonga.miuix.kmp.basic.IconButton
+import top.yukonga.miuix.kmp.basic.Scaffold
+import top.yukonga.miuix.kmp.basic.Slider
+import top.yukonga.miuix.kmp.basic.SmallTitle
+import top.yukonga.miuix.kmp.basic.SmallTopAppBar
+import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.basic.TextButton
+import top.yukonga.miuix.kmp.basic.TextField
+import top.yukonga.miuix.kmp.extra.SuperArrow
+import top.yukonga.miuix.kmp.extra.SuperSwitch
+import top.yukonga.miuix.kmp.extra.WindowDialog
+import top.yukonga.miuix.kmp.theme.ColorSchemeMode
+import top.yukonga.miuix.kmp.theme.MiuixTheme
+import top.yukonga.miuix.kmp.theme.ThemeController
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -55,7 +60,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -69,7 +73,6 @@ import io.github.yuxiximyxx.magicfree4.pods.hem.EqPreset
 import io.github.yuxiximyxx.magicfree4.pods.hem.PodProfile
 import io.github.yuxiximyxx.magicfree4.pods.hem.PodProfiles
 import io.github.yuxiximyxx.magicfree4.diag.ModuleDiagnostics
-import io.github.yuxiximyxx.magicfree4.ui.MagicOriGTheme
 import io.github.yuxiximyxx.magicfree4.utils.DeviceIdentity
 import io.github.yuxiximyxx.magicfree4.utils.MagicOriGAction
 import io.github.yuxiximyxx.magicfree4.utils.PodIdentity
@@ -145,9 +148,11 @@ class EarphoneDetailActivity : ComponentActivity() {
                     w.navigationBarColor = if (dark) 0xFF000000.toInt() else 0xFFF2F2F7.toInt()
                 }
             }
-            MagicOriGTheme {
-                Surface(modifier = Modifier.fillMaxSize(), color = P.bg) { Root() }
+            // MIUIX 迁移（v2.11.0）：主题层换 MiuixTheme，深浅跟随系统（与 P 调色板同一信号 dark）
+            val controller = remember(dark) {
+                ThemeController(if (dark) ColorSchemeMode.Dark else ColorSchemeMode.Light)
             }
+            MiuixTheme(controller = controller) { Root() }
         }
     }
 
@@ -252,15 +257,41 @@ class EarphoneDetailActivity : ComponentActivity() {
         val profile = PodProfiles.byId(modelId) ?: PodProfiles.FREE4
         SideEffect { title = profile.displayName }
 
-        val statusBar = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
-
         Box(modifier = Modifier.fillMaxSize()) {
+            // —— MIUIX 骨架：Scaffold + SmallTopAppBar（返回钮进行为与旧自绘顶栏一致）——
+            Scaffold(
+                containerColor = P.bg,
+                topBar = {
+                    SmallTopAppBar(
+                        title = when (page) {
+                            0 -> profile.displayName
+                            1 -> "均衡器"
+                            3 -> "耳机手势"
+                            4 -> "设备双连"
+                            5 -> if (editId < 0) "新建均衡预设" else "编辑均衡预设"
+                            6 -> "关于耳机"
+                            7 -> "电量历史"
+                            else -> "耳机设置"
+                        },
+                        color = Color.Transparent,
+                        navigationIcon = {
+                            IconButton(onClick = { if (page == 0) finish() else page = 0 }) {
+                                Image(
+                                    painter = painterResource(R.drawable.ic_back),
+                                    contentDescription = "返回",
+                                    modifier = Modifier.size(20.dp),
+                                )
+                            }
+                        },
+                    )
+                },
+            ) { innerPadding ->
             // —— 可滚动内容 ——
             Column(
                 modifier = Modifier
                     .fillMaxSize()
                     .verticalScroll(rememberScrollState())
-                    .padding(top = statusBar + 56.dp),
+                    .padding(innerPadding),
             ) {
                 Column(modifier = Modifier.padding(horizontal = 16.dp)) {
                     // 标题只保留在顶部栏（与系统设置一致），这里只放连接态
@@ -406,59 +437,7 @@ class EarphoneDetailActivity : ComponentActivity() {
                 }
             }
 
-            // —— 顶部渐变模糊遮罩（内容从标题下滚过时渐隐）——
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(statusBar + 56.dp)
-                    .background(
-                        // 顶部 40% 保持完全不透明：浅色模式下内容滚到标题后面时，
-                        // 半透明的遮罩会让「关闭/降噪」那几个高饱和按钮透出来，看起来很脏。
-                        Brush.verticalGradient(
-                            0.0f to P.bg,
-                            0.45f to P.bg,
-                            0.78f to P.bg.copy(alpha = 0.62f),
-                            1.0f to Color.Transparent,
-                        )
-                    ),
-            )
-
-            // —— 顶部栏：圆形返回 + 标题 ——
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = statusBar + 8.dp, start = 12.dp, end = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(44.dp)
-                        .background(P.cardAlt, CircleShape)
-                        .clickable { if (page == 0) finish() else page = 0 },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Image(
-                        painter = painterResource(R.drawable.ic_back),
-                        contentDescription = "返回",
-                        modifier = Modifier.size(20.dp),
-                    )
-                }
-                Text(
-                    when (page) {
-                        0 -> profile.displayName
-                        1 -> "均衡器"
-                        3 -> "耳机手势"
-                        4 -> "设备双连"
-                        5 -> if (editId < 0) "新建均衡预设" else "编辑均衡预设"
-                        6 -> "关于耳机"
-                        7 -> "电量历史"
-                        else -> "耳机设置"
-                    },
-                    fontSize = 17.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = P.textPrimary,
-                )
+            }
             }
         }
 
@@ -466,166 +445,162 @@ class EarphoneDetailActivity : ComponentActivity() {
         if (pick != null) {
             val onCall = pick[1] == 0x06
             val options = if (onCall) FUNCTIONS_ON_CALL else FUNCTIONS
-            AlertDialog(
+            WindowDialog(
+                show = true,
+                title = if (onCall) "通话中 · 设为功能" else "主按键 · 设为功能",
                 onDismissRequest = { showGestPick = null },
-                shape = RoundedCornerShape(20.dp),
-                containerColor = P.card,
-                title = {
-                    Text(
-                        if (onCall) "通话中 · 设为功能" else "主按键 · 设为功能",
-                        color = P.textPrimary, fontSize = 17.sp, fontWeight = FontWeight.Medium,
-                    )
-                },
-                text = {
-                    Column {
-                        for ((fn, name) in options) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .heightIn(min = 48.dp)
-                                    .clickable {
-                                        send(MagicOriGAction.ACTION_GESTURE_SET) {
-                                            putExtra("dev", pick[0])
-                                            putExtra("btn", pick[1])
-                                            putExtra("act", pick[2])
-                                            putExtra("fn", fn)
-                                        }
-                                        showGestPick = null
-                                    },
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Text(name, fontSize = 15.sp, color = P.textPrimary)
-                            }
+            ) {
+                Column {
+                    for ((fn, name) in options) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 48.dp)
+                                .clickable {
+                                    send(MagicOriGAction.ACTION_GESTURE_SET) {
+                                        putExtra("dev", pick[0])
+                                        putExtra("btn", pick[1])
+                                        putExtra("act", pick[2])
+                                        putExtra("fn", fn)
+                                    }
+                                    showGestPick = null
+                                },
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(name, fontSize = 15.sp, color = P.textPrimary)
                         }
                     }
-                },
-                confirmButton = {
-                    TextButton(onClick = { showGestPick = null }) { Text("取消", color = P.accent) }
-                },
-            )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End,
+                    ) {
+                        TextButton(
+                            text = "取消",
+                            onClick = { showGestPick = null },
+                            colors = ButtonDefaults.textButtonColors(textColor = P.accent),
+                        )
+                    }
+                }
+            }
         }
 
         if (eqDeleteId >= 0) {
             val target = parseCustomEq(eqCustomRaw).firstOrNull { it.id == eqDeleteId }
-            AlertDialog(
+            WindowDialog(
+                show = true,
+                title = "删除预设",
+                summary = "删除「${target?.name ?: eqDeleteId}」？此操作不可恢复。",
                 onDismissRequest = { eqDeleteId = -1 },
-                shape = RoundedCornerShape(20.dp),
-                containerColor = P.card,
-                title = { Text("删除预设", color = P.textPrimary, fontSize = 17.sp, fontWeight = FontWeight.Medium) },
-                text = {
-                    Text(
-                        "删除「${target?.name ?: eqDeleteId}」？此操作不可恢复。",
-                        color = P.textSecondary, fontSize = 14.sp,
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                ) {
+                    TextButton(
+                        text = "取消",
+                        onClick = { eqDeleteId = -1 },
+                        colors = ButtonDefaults.textButtonColors(textColor = P.textSecondary),
                     )
-                },
-                confirmButton = {
-                    TextButton(onClick = {
-                        send(MagicOriGAction.ACTION_EQ_CUSTOM) {
-                            putExtra("action", 3)
-                            putExtra("id", eqDeleteId)
-                        }
-                        eqDeleteId = -1
-                    }) { Text("删除", color = P.danger) }
-                },
-                dismissButton = {
-                    TextButton(onClick = { eqDeleteId = -1 }) { Text("取消", color = P.textSecondary) }
-                },
-            )
+                    Spacer(Modifier.width(8.dp))
+                    TextButton(
+                        text = "删除",
+                        onClick = {
+                            send(MagicOriGAction.ACTION_EQ_CUSTOM) {
+                                putExtra("action", 3)
+                                putExtra("id", eqDeleteId)
+                            }
+                            eqDeleteId = -1
+                        },
+                        colors = ButtonDefaults.textButtonColors(textColor = P.danger),
+                    )
+                }
+            }
         }
 
         if (renameFor != -1) {
-            AlertDialog(
+            WindowDialog(
+                show = true,
+                title = "预设名称",
                 onDismissRequest = { renameFor = -1 },
-                shape = RoundedCornerShape(20.dp),
-                containerColor = P.card,
-                title = { Text("预设名称", color = P.textPrimary, fontSize = 17.sp, fontWeight = FontWeight.Medium) },
-                text = {
-                    OutlinedTextField(
+            ) {
+                Column {
+                    TextField(
                         value = renameText,
                         onValueChange = { if (it.length <= 20) renameText = it },
+                        label = "预设名称",
                         singleLine = true,
-                        colors = TextFieldDefaults.colors(
-                            focusedContainerColor = P.cardAlt,
-                            unfocusedContainerColor = P.cardAlt,
-                            focusedTextColor = P.textPrimary,
-                            unfocusedTextColor = P.textPrimary,
-                            cursorColor = P.accent,
-                            focusedIndicatorColor = P.accent,
-                            unfocusedIndicatorColor = P.line,
-                        ),
+                        modifier = Modifier.fillMaxWidth(),
                     )
-                },
-                confirmButton = {
-                    TextButton(onClick = {
-                        editName = renameText.ifBlank { editName }
-                        if (renameFor >= 0) {
-                            // 直接保存改名（沿用当前增益）
-                            send(MagicOriGAction.ACTION_EQ_CUSTOM) {
-                                putExtra("action", 2)
-                                putExtra("id", renameFor)
-                                putExtra("name", editName)
-                                putExtra("gains", editGains.joinToString(","))
-                            }
-                        }
-                        renameFor = -1
-                    }) { Text("保存", color = P.accent) }
-                },
-                dismissButton = {
-                    TextButton(onClick = { renameFor = -1 }) { Text("取消", color = P.textSecondary) }
-                },
-            )
+                    Spacer(Modifier.height(16.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End,
+                    ) {
+                        TextButton(
+                            text = "取消",
+                            onClick = { renameFor = -1 },
+                            colors = ButtonDefaults.textButtonColors(textColor = P.textSecondary),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        TextButton(
+                            text = "保存",
+                            onClick = {
+                                editName = renameText.ifBlank { editName }
+                                if (renameFor >= 0) {
+                                    // 直接保存改名（沿用当前增益）
+                                    send(MagicOriGAction.ACTION_EQ_CUSTOM) {
+                                        putExtra("action", 2)
+                                        putExtra("id", renameFor)
+                                        putExtra("name", editName)
+                                        putExtra("gains", editGains.joinToString(","))
+                                    }
+                                }
+                                renameFor = -1
+                            },
+                            colors = ButtonDefaults.textButtonColors(textColor = P.accent),
+                        )
+                    }
+                }
+            }
         }
 
         if (showVol) {
-            AlertDialog(
+            WindowDialog(
+                show = true,
+                title = "提示音音量",
                 onDismissRequest = { showVol = false },
-                shape = RoundedCornerShape(20.dp),
-                containerColor = P.card,
-                title = { Text("提示音音量", color = P.textPrimary, fontSize = 17.sp, fontWeight = FontWeight.Medium) },
-                text = {
-                    Column {
-                        Text("$alertVol / 10", fontSize = 18.sp, color = P.textPrimary)
-                        Slider(
-                            value = alertVol.toFloat(),
-                            onValueChange = { alertVol = it.toInt().coerceIn(1, 10) },
-                            valueRange = 1f..10f,
-                            // 不用 steps：荣耀的滑杆是连续轨道 + 白色圆点，没有刻度点
-                            steps = 0,
-                            thumb = {
-                                Box(
-                                    modifier = Modifier
-                                        .size(22.dp)
-                                        .background(Color.White, CircleShape)
-                                )
+            ) {
+                Column {
+                    Text("$alertVol / 10", fontSize = 18.sp, color = P.textPrimary)
+                    Slider(
+                        value = alertVol.toFloat(),
+                        onValueChange = { alertVol = it.toInt().coerceIn(1, 10) },
+                        valueRange = 1f..10f,
+                        steps = 0,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End,
+                    ) {
+                        TextButton(
+                            text = "取消",
+                            onClick = { showVol = false },
+                            colors = ButtonDefaults.textButtonColors(textColor = P.textSecondary),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        TextButton(
+                            text = "保存",
+                            onClick = {
+                                send(MagicOriGAction.ACTION_ALERT_VOLUME) { putExtra("level", alertVol) }
+                                showVol = false
                             },
-                            track = { sliderState ->
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .height(4.dp)
-                                        .background(P.cardAlt, CircleShape)
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .fillMaxWidth(sliderState.value / 10f)
-                                            .height(4.dp)
-                                            .background(P.accent, CircleShape)
-                                    )
-                                }
-                            },
+                            colors = ButtonDefaults.textButtonColors(textColor = P.accent),
                         )
                     }
-                },
-                confirmButton = {
-                    TextButton(onClick = {
-                        send(MagicOriGAction.ACTION_ALERT_VOLUME) { putExtra("level", alertVol) }
-                        showVol = false
-                    }) { Text("保存", color = P.accent) }
-                },
-                dismissButton = {
-                    TextButton(onClick = { showVol = false }) { Text("取消", color = P.textSecondary) }
-                },
-            )
+                }
+            }
         }
     }
 
@@ -974,17 +949,13 @@ class EarphoneDetailActivity : ComponentActivity() {
 
     @Composable
     private fun InfoRow(label: String, value: String) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 56.dp)
-                .padding(horizontal = 16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Text(label, fontSize = 15.sp, color = P.textPrimary)
-            Text(value, fontSize = 14.sp, color = P.textSecondary)
-        }
+        // MIUIX 只读行：左标签 + 右侧值（无箭头、不可点）
+        BasicComponent(
+            title = label,
+            rightActions = {
+                Text(value, fontSize = 14.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+            },
+        )
     }
 
     // ── 页面 7：电量历史 ────────────────────────────────────
@@ -1316,18 +1287,21 @@ class EarphoneDetailActivity : ComponentActivity() {
 
     @Composable
     private fun SectionTitle(text: String) {
-        Text(text, fontSize = 13.sp, color = P.textSecondary, modifier = Modifier.padding(start = 4.dp))
+        // MIUIX 分组标题（原自绘 Text 换 SmallTitle，调用点不变）
+        SmallTitle(text = text, insideMargin = PaddingValues(start = 4.dp))
     }
 
     @Composable
     private fun Card20(padding: androidx.compose.ui.unit.Dp = 16.dp, content: @Composable () -> Unit) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(P.card, RoundedCornerShape(20.dp))
-                .padding(padding),
-            content = { content() },
-        )
+        // MIUIX Card 容器（色/圆角沿用旧自绘卡取值，内部行组件已换 Miuix）
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            color = P.card,
+            cornerRadius = 20.dp,
+            insideMargin = PaddingValues(padding),
+        ) {
+            Column { content() }
+        }
     }
 
     @Composable
@@ -1418,50 +1392,24 @@ class EarphoneDetailActivity : ComponentActivity() {
         enabled: Boolean,
         onClick: () -> Unit,
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 56.dp)
-                .clickable(enabled = enabled) { onClick() }
-                .padding(horizontal = 16.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(title, fontSize = 15.sp, color = if (enabled) P.textPrimary else P.textTertiary)
-                Text(subtitle, fontSize = 12.sp, color = P.textSecondary)
-            }
-            Switch(
-                checked = checked,
-                onCheckedChange = { onClick() },
-                enabled = enabled,
-                colors = SwitchDefaults.colors(
-                    checkedThumbColor = Color.White,
-                    checkedTrackColor = P.accent,
-                    uncheckedThumbColor = P.textSecondary,
-                    uncheckedTrackColor = P.cardAlt,
-                ),
-            )
-        }
+        // MIUIX 开关行（整行点按与开关拨动都走同一个 onClick，行为与旧 SwitchRow 一致）
+        SuperSwitch(
+            title = title,
+            summary = subtitle.takeIf { it.isNotEmpty() },
+            checked = checked,
+            onCheckedChange = { onClick() },
+            enabled = enabled,
+        )
     }
 
     @Composable
     private fun NavRow(title: String, subtitle: String, onClick: () -> Unit) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 56.dp)
-                .clickable { onClick() }
-                .padding(horizontal = 16.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(title, fontSize = 15.sp, color = P.textPrimary)
-                if (subtitle.isNotEmpty()) Text(subtitle, fontSize = 12.sp, color = P.textSecondary)
-            }
-            Text("›", fontSize = 20.sp, color = P.textTertiary)
-        }
+        // MIUIX 导航行（标题 + 摘要 + 箭头）
+        SuperArrow(
+            title = title,
+            summary = subtitle.takeIf { it.isNotEmpty() },
+            onClick = onClick,
+        )
     }
 
     // ── 数据 ───────────────────────────────────────────────
