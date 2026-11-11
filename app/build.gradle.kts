@@ -2,10 +2,10 @@ import java.util.zip.ZipFile
 
 plugins {
     alias(libs.plugins.agp.app)
-    alias(libs.plugins.kotlin)
+    // AGP 9 内置 Kotlin：不再 apply org.jetbrains.kotlin.android（apply 会直接报错），
+    // 与 LumaGA 同款；kotlin-parcelize 全仓无 @Parcelize 使用，一并去掉。
     alias(libs.plugins.kotlinSerialization)
     alias(libs.plugins.composeCompiler)
-    id("kotlin-parcelize")
 }
 
 // 发布签名密钥库。*.jks 在 .gitignore 里，克隆仓库后该文件默认不存在；
