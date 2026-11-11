@@ -26,7 +26,7 @@ jobs:
           SDKMANAGER=$(ls "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1)
           echo "sdkmanager=$SDKMANAGER ANDROID_HOME=$ANDROID_HOME"
           yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
-          yes | "$SDKMANAGER" "platform-tools" "platforms;android-34" "build-tools;34.0.0" 2>&1 | tail -3
+          yes | "$SDKMANAGER" "platform-tools" "platforms;android-36" "build-tools;36.0.0" 2>&1 | tail -3
           ls "$ANDROID_HOME/platforms" "$ANDROID_HOME/build-tools"
 
       - name: Prepare keystore
@@ -50,13 +50,13 @@ jobs:
           mkdir -p dist
           SRC=$(ls app/build/outputs/apk/release/*.apk | head -1)
           echo "release apk: $SRC"
-          cp "$SRC" dist/MagicPods-2.10.16-release.apk
+          cp "$SRC" dist/MagicPods-2.11.0-release.apk
           ls -lh dist
 
       - name: Verify signature
         run: |
           SDK=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          "$SDK/apksigner" verify --print-certs dist/MagicPods-2.10.16-release.apk
+          "$SDK/apksigner" verify --print-certs dist/MagicPods-2.11.0-release.apk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -68,33 +68,26 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.10.16
-          name: MagicPods 2.10.16
+          tag_name: v2.11.0
+          name: MagicPods 2.11.0
           body: |
-            ## MagicPods 2.10.16（灵动胶囊第二行恢复设备名）
+            ## MagicPods 2.11.0（详情页迁 MIUIX）
 
-            真机实证（2026-11-10 18:18 截图）：v2.10.15
-            的音频通知已验正（标题=OPPO Enco Free4、
-            正文=左耳/右耳电量行），但顶部灵动胶囊第二行
-            被换成了「左耳 90% 右耳 90%」——胶囊的设备名
-            TextView 也走 setText 终防线、id 非 title，
-            被机型名分支一并改成了电量行。胶囊第二行应
-            显示设备名（电量已有右侧电量环），与原生
-            FreeBuds、XM4 的胶囊一致。
+            耳机详情页按统一风格口径迁到 MIUIX（Miuix-KMP
+            真组件）：主题层换 MiuixTheme、骨架换 Miuix
+            Scaffold + SmallTopAppBar、分组换 Miuix Card +
+            SmallTitle、导航行换 SuperArrow、开关行换
+            SuperSwitch、只读行换 BasicComponent、滑杆与
+            弹窗换 Miuix Slider / WindowDialog。电量环、降噪
+            分段等自绘部件保留原绘制、放进 Miuix 卡片容器。
 
-            本版改动（只动 SystemUIHeadsetIconHook 的
-            rewriteAudioLabel 机型名分支）：
+            工具链同步对齐 LumaGA 实证组合：Gradle 9.3.1 /
+            AGP 9.1.1 / Kotlin 2.4.10 / Compose BOM 2026.05.00 /
+            miuix 0.8.8（旧版被注释掉的 miuix 依赖卡点即
+            工具链过旧，本版一并解除）。
 
-            - 新增胶囊守卫（RemoteViews / setText 两路
-              共用）：视图 id 为 hncard_view_message_text_2
-              或祖先链含 HnCardLayout / HnDynamicCard 时
-              返回 null 保设备名，不换电量行。信号来自
-              四份日志里恒定的「改写信号」：胶囊名位 id
-              与祖先链稳定，与通知正文（id=audio_device_name）
-              恒定可分。
-            - 通知正文的电量行改写、标题保名、占位分支
-              等其余逻辑逐行不动，v2.10.15 验正的通知
-              形态不受影响。
-
-            与 2.10.1–2.10.15 同一签名，可直接覆盖安装。
+            功能与数据流零变化：页面结构、条目、文案、跳转、
+            广播与协议调用、状态读取全部原样；所有 hook、
+            身份与协议层未动。与 2.10.x 同一签名，可直接
+            覆盖安装。
           files: dist/*.apk
