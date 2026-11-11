@@ -950,7 +950,7 @@ class EarphoneDetailActivity : ComponentActivity() {
         // MIUIX 只读行：左标签 + 右侧值（无箭头、不可点）
         BasicComponent(
             title = label,
-            rightActions = {
+            endActions = {
                 Text(value, fontSize = 14.sp, color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
             },
         )
@@ -1294,7 +1294,6 @@ class EarphoneDetailActivity : ComponentActivity() {
         // MIUIX Card 容器（色/圆角沿用旧自绘卡取值，内部行组件已换 Miuix）
         Card(
             modifier = Modifier.fillMaxWidth(),
-            color = P.card,
             cornerRadius = 20.dp,
             insideMargin = PaddingValues(padding),
         ) {
